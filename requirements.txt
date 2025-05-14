@@ -7,6 +7,7 @@ cryptography==44.0.1
 hyperlink==21.0.0
 idna==3.10
 incremental==24.7.2
+psycopg2-binary==2.9.10
 pyasn1==0.6.1
 pyasn1_modules==0.4.1
 pycparser==2.22
@@ -15,6 +16,7 @@ pyseccomp==0.1.2
 pyserial==3.5
 python-gsmmodem-new==0.13.0
 service-identity==24.2.0
+setuptools==80.1.0
 six==1.17.0
 tomli==2.2.1
 Twisted==24.11.0
