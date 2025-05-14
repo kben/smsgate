@@ -7,6 +7,14 @@ password = secretpass
 recipient = mailbox@example.org
 health_check_interval = 600
 
+[dbstore]
+enabled = True
+dbname = postgres
+dbuser = postgres
+dbpass = postgres
+dbport = 54322
+dbhost = localhost
+
 [server]
 host = localhost
 port = 7000

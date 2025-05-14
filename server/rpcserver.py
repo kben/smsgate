@@ -332,7 +332,7 @@ def set_up_server(
     port = config.getint("server", "port", fallback=7000)
     host = config.get("server", "host", fallback="localhost")
     cert = config.get("server", "certificate")
-    key = config.get("server", "key")
+    key = config.get("server", "key", fallback="NOT")
 
     # read allowed ciphers, use a sane fallback value
     ciphers = config.get("server", "ciphers", fallback=default_ciphers)
@@ -343,18 +343,23 @@ def set_up_server(
         l.warning("Allowing others to send SMS means to allow others to book expensive options and to commit "
                   "fraud by sending messages to expensive service numbers.")
 
-    sslContextFactory = ssl.DefaultOpenSSLContextFactory(
-        key, cert, _contextFactory=MySSLContext
-    )
+    if key != "NOT":
+        sslContextFactory = ssl.DefaultOpenSSLContextFactory(
+            key, cert, _contextFactory=MySSLContext
+        )
 
-    https_server = endpoints.SSL4ServerEndpoint(
-        reactor, port, sslContextFactory=sslContextFactory, interface=host
-    )
+        httpx_server = endpoints.SSL4ServerEndpoint(
+            reactor, port, sslContextFactory=sslContextFactory, interface=host
+        )
+    else:
+        httpx_server = endpoints.TCP4ServerEndpoint(
+            reactor, port, interface=host
+        )
 
     l.debug("Launching site.")
     factory = server.Site(RPCServer(config, modempool, smtp))
     l.debug("Listen for connections.")
-    https_server.listen(factory)
+    httpx_server.listen(factory)
     l.debug("Calling run().")
     reactor.run(installSignalHandlers=False)
     l.info("RPCServer initialized.")
