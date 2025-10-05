@@ -184,7 +184,7 @@ class SmsGate:
                         cur = self.dbstore.cursor()
                         cur.execute("SELECT deal_id FROM communication WHERE value ilike '%%' || %s || '%%'", (_sms.get_sender(),))
                         dealid = cur.fetchone()
-                        if len(dealid) > 0:
+                        if dealid != None and len(dealid) > 0:
                             self.l.info(f"[{_sms.get_id()}] Try to store SMS into database - assign {dealid[0]}.")
                             cur.execute("INSERT INTO mail_message (id, deal_id, gthreadid, gmail_auth_id, subject, snippet, body, \"from\", \"to\", mdate) VALUES (%s, '{%s}', %s, %s, %s, %s, null, %s, %s, NOW())",
                                         ("SMS-" + _sms.get_id(), dealid[0], "SMS-" + _sms.get_id(), 0, "SMS", _sms.get_text(), _sms.get_sender(), _sms.get_recipient()))
