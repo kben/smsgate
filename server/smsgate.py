@@ -182,6 +182,18 @@ class SmsGate:
 
                     if self.config.getboolean("dbstore", "enabled", fallback=False):
                         cur = self.dbstore.cursor()
+                        if cur == None:
+                             self.dbstore = psycopg2.connect(
+                                  database=self.config.get("dbstore", "dbname"),
+                                  host=self.config.get("dbstore", "dbhost"),
+                                  user=self.config.get("dbstore", "dbuser"),
+                                  password=self.config.get("dbstore", "dbpass"),
+                                  port=self.config.get("dbstore", "dbport")
+                             )
+
+                        sender = _sms.get_sender()
+                        if sender.startswith("+"):
+                            sender = sender[3:]
                         cur.execute("SELECT deal_id FROM communication WHERE value ilike '%%' || %s || '%%'", (_sms.get_sender(),))
                         dealid = cur.fetchone()
                         if dealid != None and len(dealid) > 0:
