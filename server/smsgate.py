@@ -181,8 +181,19 @@ class SmsGate:
                             time.sleep(30)
 
                     if self.config.getboolean("dbstore", "enabled", fallback=False):
-                        cur = self.dbstore.cursor()
-                        if cur == None:
+                        # check if connection is still valid.
+                        try:
+                             if self.dbstore:
+                               self.dbstore.isolation_level
+                             else:
+                               self.dbstore = psycopg2.connect(
+                                    database=self.config.get("dbstore", "dbname"),
+                                    host=self.config.get("dbstore", "dbhost"),
+                                    user=self.config.get("dbstore", "dbuser"),
+                                    password=self.config.get("dbstore", "dbpass"),
+                                    port=self.config.get("dbstore", "dbport")
+                               )
+                        except Exception as oe:
                              self.dbstore = psycopg2.connect(
                                   database=self.config.get("dbstore", "dbname"),
                                   host=self.config.get("dbstore", "dbhost"),
@@ -190,18 +201,19 @@ class SmsGate:
                                   password=self.config.get("dbstore", "dbpass"),
                                   port=self.config.get("dbstore", "dbport")
                              )
+                        cur = self.dbstore.cursor()
 
                         sender = _sms.get_sender()
                         if sender.startswith("+"):
                             sender = sender[3:]
-                        cur.execute("SELECT deal_id FROM communication WHERE value ilike '%%' || %s || '%%'", (_sms.get_sender(),))
+                        cur.execute("SELECT c.deal_id FROM communication as c JOIN deal AS d ON d.deal_id = c.deal_id WHERE value ilike '%%' || %s || '%%' order by lost_at DESC", (sender,))
                         dealid = cur.fetchone()
                         if dealid != None and len(dealid) > 0:
                             self.l.info(f"[{_sms.get_id()}] Try to store SMS into database - assign {dealid[0]}.")
-                            cur.execute("INSERT INTO mail_message (id, deal_id, gthreadid, gmail_auth_id, subject, snippet, body, \"from\", \"to\", mdate) VALUES (%s, '{%s}', %s, %s, %s, %s, null, %s, %s, NOW())",
+                            cur.execute("INSERT INTO mail_message (id, deal_ids, gthreadid, gmail_auth_id, subject, snippet, body, \"from\", \"to\", mdate) VALUES (%s, '{%s}', %s, %s, %s, %s, null, %s, %s, NOW())",
                                         ("SMS-" + _sms.get_id(), dealid[0], "SMS-" + _sms.get_id(), 0, "SMS", _sms.get_text(), _sms.get_sender(), _sms.get_recipient()))
                         else:
-                            self.l.info(f"[{_sms.get_id()}] Try to store SMS into database - not assigned.")
+                            self.l.info(f"[{_sms.get_id()}] Try to store SMS into database - not assigned. -  (sender).")
                             cur.execute('INSERT INTO mail_message (id, gthreadid, gmail_auth_id, subject, snippet, body, "from", "to", mdate) VALUES (%s, %s, %s, %s, %s, null, %s, %s, NOW())',
                                         ("SMS-" + _sms.get_id(), "SMS-" + _sms.get_id(), 0, "SMS", _sms.get_text(), _sms.get_sender(), _sms.get_recipient()))
                         self.dbstore.commit()
@@ -214,8 +226,8 @@ class SmsGate:
                 if self.config.getboolean("mail", "enabled", fallback=False):
                     self.smtp_delivery.do_health_check()
             except Exception as e:
-                self.l.warning("Got exception.")
-                print(e)
+                self.l.warning("Got exception:")
+                self.l.warning(e)
             except:
                 self.l.warning("_do_delivery(): Unknown exception.")
                 traceback.print_exc()

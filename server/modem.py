@@ -99,6 +99,8 @@ class Modem(threading.Thread):
         self.current_network = None
         self.current_signal = 0
 
+        self.send_last_call_time = 0
+
         self.l = logging.getLogger(f"Modem [{identifier}]")
 
         threading.Thread.__init__(self)
@@ -1012,6 +1014,7 @@ class Modem(threading.Thread):
         """
         Modem run loop
         """
+        seconds_between_calls = 15
 
         while True:
 
@@ -1025,6 +1028,13 @@ class Modem(threading.Thread):
                 try:
                     # Wait for SMS or for a timeout
                     _sms = self.sms_sender_queue.get(timeout=60)
+                    current_time = time.time()
+                    elapsed_time = current_time - self.send_last_call_time
+
+                    if elapsed_time < seconds_between_calls:
+                        time_to_wait = seconds_between_calls - elapsed_time
+                        self.l.info(f"Throttled. Waiting for {time_to_wait:.2f} seconds.")
+                        time.sleep(time_to_wait)
                     self._do_send_sms(_sms)
                 except queue.Empty:
                     pass
