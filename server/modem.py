@@ -1055,6 +1055,7 @@ class Modem(threading.Thread):
                 self.status = "Timeout."
                 self.close()
 
+                self.sms_sender_queue.put(_sms)
                 self._do_health_check(do_now=True)
 
 
