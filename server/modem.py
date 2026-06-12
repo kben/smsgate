@@ -99,6 +99,11 @@ _original_handleSmsReceived = GsmModem._handleSmsReceived
 def _patched_handleSmsReceived(self, notificationLine):
     try:
         return _original_handleSmsReceived(self, notificationLine)
+    except CmsError as e:
+        if e.code == 321:
+            self.log.warning('SMS message at index already cleared or invalid (CMS 321) for notification %r', notificationLine)
+        else:
+            self.log.error('Error handling received SMS notification %r: %s', notificationLine, e, exc_info=True)
     except Exception as e:
         self.log.error('Error handling received SMS notification %r: %s', notificationLine, e, exc_info=True)
 
@@ -111,6 +116,11 @@ _original_handleSmsStatusReport = GsmModem._handleSmsStatusReport
 def _patched_handleSmsStatusReport(self, notificationLine):
     try:
         return _original_handleSmsStatusReport(self, notificationLine)
+    except CmsError as e:
+        if e.code == 321:
+            self.log.warning('SMS status report at index already cleared or invalid (CMS 321) for notification %r', notificationLine)
+        else:
+            self.log.error('Error handling SMS status report notification %r: %s', notificationLine, e, exc_info=True)
     except Exception as e:
         self.log.error('Error handling SMS status report notification %r: %s', notificationLine, e, exc_info=True)
 
@@ -123,6 +133,11 @@ _original_handleSmsStatusReportTe = GsmModem._handleSmsStatusReportTe
 def _patched_handleSmsStatusReportTe(self, length, notificationLine):
     try:
         return _original_handleSmsStatusReportTe(self, length, notificationLine)
+    except CmsError as e:
+        if e.code == 321:
+            self.log.warning('TE SMS status report at index already cleared or invalid (CMS 321) for notification %r', notificationLine)
+        else:
+            self.log.error('Error handling TE SMS status report notification %r (length %s): %s', notificationLine, length, e, exc_info=True)
     except Exception as e:
         self.log.error('Error handling TE SMS status report notification %r (length %s): %s', notificationLine, length, e, exc_info=True)
 
