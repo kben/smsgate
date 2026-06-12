@@ -61,6 +61,54 @@ from gsmmodem.exceptions import (
 from gsmmodem.modem import GsmModem, SerialComms, SentSms, ReceivedSms
 from gsmmodem.pdu import decodeSmsPdu, Concatenation
 
+# Patch GsmModem.write to filter out unsolicited notifications (e.g. +CDSI, +CMTI, etc.)
+# which can interleave command responses under high load and cause parsing failures.
+_original_gsm_modem_write = GsmModem.write
+
+def _patched_gsm_modem_write(self, *args, **kwargs):
+    waitForResponse = True
+    if len(args) > 1:
+        waitForResponse = args[1]
+    elif 'waitForResponse' in kwargs:
+        waitForResponse = kwargs['waitForResponse']
+
+    responseLines = _original_gsm_modem_write(self, *args, **kwargs)
+    if waitForResponse and responseLines:
+        filteredResponseLines = []
+        unsolicitedLines = []
+        next_line_is_pdu = False
+        for line in responseLines:
+            is_unsolicited = False
+            if self.RESPONSE_TERM.match(line):
+                pass
+            elif next_line_is_pdu:
+                unsolicitedLines.append(line)
+                next_line_is_pdu = False
+                is_unsolicited = True
+            elif line.startswith('+CMTI') or line.startswith('+CDSI') or line.startswith('+DTMF') or 'RING' in line:
+                unsolicitedLines.append(line)
+                is_unsolicited = True
+            elif line.startswith('+CDS') or line.startswith('+CMT'):
+                unsolicitedLines.append(line)
+                is_unsolicited = True
+                next_line_is_pdu = True
+            else:
+                for updateRegex, _ in getattr(self, '_callStatusUpdates', []):
+                    if updateRegex.match(line):
+                        unsolicitedLines.append(line)
+                        is_unsolicited = True
+                        break
+            if not is_unsolicited:
+                filteredResponseLines.append(line)
+        if unsolicitedLines:
+            self.log.debug('Filtered unsolicited lines from command response: %s', unsolicitedLines)
+            self._handleModemNotification(unsolicitedLines)
+        responseLines = filteredResponseLines
+    return responseLines
+
+GsmModem.write = _patched_gsm_modem_write
+
+
 import modemconfig
 import sms
 import serialportmapper
