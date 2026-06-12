@@ -314,6 +314,18 @@ class Modem(threading.Thread):
             del self.processed_cmt_signatures[sig]
             return
 
+        # Extract UDH/concatenation info if present
+        udh = getattr(_sms, "udh", []) or []
+        concat_ref = None
+        concat_parts = None
+        concat_num = None
+        for ie in udh:
+            if isinstance(ie, Concatenation):
+                concat_ref = ie.reference
+                concat_parts = ie.parts
+                concat_num = ie.number
+                break
+
         new_sms = sms.SMS(
             sms_id=None,
             recipient=self.modem_config.phone_number,
@@ -321,6 +333,9 @@ class Modem(threading.Thread):
             sender=_sms.number,
             timestamp=_sms.time,
             receiving_modem=self,
+            concat_ref=concat_ref,
+            concat_parts=concat_parts,
+            concat_num=concat_num,
         )
 
         self._handle_incoming_sms(new_sms)
