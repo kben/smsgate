@@ -59,7 +59,7 @@ from gsmmodem.exceptions import (
     CmsError,
 )
 from gsmmodem.modem import GsmModem, SerialComms, SentSms, ReceivedSms
-from gsmmodem.pdu import decodeSmsPdu
+from gsmmodem.pdu import decodeSmsPdu, Concatenation
 
 import modemconfig
 import sms
@@ -79,6 +79,8 @@ class Modem(threading.Thread):
         self.sms_receiver_queue = queue.Queue()
         self.sms_sender_queue = queue.Queue()
         self.sent_sms = {}  # a dict of sent SMS; value is an SMS object
+        self.received_concat_buffer = {}  # key: (sender, concat_ref) -> dict of {num: SMS_object}
+        self.processed_cmt_signatures = {}  # dict of (sender, text) -> timestamp for recently received CMT messages
 
         self.last_health_check = None
         self.health_state = "OK"
@@ -297,6 +299,21 @@ class Modem(threading.Thread):
         Handle incoming SMS from the python-gsmmodem-new layer.
         The _sms parameter is a gsmmodem.modem.ReceivedSms.
         """
+        # If this message was already processed in _handleModemNotification, skip it
+        now = datetime.datetime.now()
+
+        # Clean up entries older than 30 seconds to prevent memory leaks
+        self.processed_cmt_signatures = {
+            k: ts for k, ts in self.processed_cmt_signatures.items()
+            if (now - ts).total_seconds() < 30
+        }
+
+        sig = (_sms.number, _sms.text)
+        if sig in self.processed_cmt_signatures:
+            self.l.debug("SMS already processed via _handleModemNotification, ignoring duplicate callback.")
+            del self.processed_cmt_signatures[sig]
+            return
+
         new_sms = sms.SMS(
             sms_id=None,
             recipient=self.modem_config.phone_number,
@@ -313,6 +330,75 @@ class Modem(threading.Thread):
         Handle incoming SMS.
         The _sms parameter is a sms.SMS object.
         """
+        now = datetime.datetime.now()
+
+        # If this is a concatenated SMS, we buffer and track its parts
+        if _sms.is_concatenated():
+            sender = _sms.get_sender() or "unknown"
+            ref = _sms.get_concat_ref()
+            num = _sms.get_concat_num()
+            total_parts = _sms.get_concat_parts()
+
+            self.l.info(f"Received concatenated SMS part {num}/{total_parts} with ref {ref} from {sender}")
+
+            # Key for the reassembly buffer
+            key = (sender, ref)
+
+            # Clean up ancient incomplete sessions (older than 1 hour)
+            for k in list(self.received_concat_buffer.keys()):
+                entry = self.received_concat_buffer[k]
+                if (now - entry['first_seen']).total_seconds() > 3600:
+                    self.l.warning(f"Discarding incomplete concatenated SMS with ref {k[1]} from {k[0]}")
+                    del self.received_concat_buffer[k]
+
+            if key not in self.received_concat_buffer:
+                self.received_concat_buffer[key] = {
+                    'parts': {},
+                    'total_parts': total_parts,
+                    'first_seen': now,
+                    'recipient': _sms.get_recipient(),
+                    'receiving_modem': _sms.get_receiving_modem(),
+                    'flash': _sms.is_flash(),
+                    'timestamp': _sms.get_timestamp(),
+                }
+
+            entry = self.received_concat_buffer[key]
+
+            # Store/overwrite the part (handles duplicate delivery gracefully)
+            entry['parts'][num] = _sms
+
+            # Check if all parts have been received
+            if len(entry['parts']) == entry['total_parts']:
+                self.l.info(f"All {entry['total_parts']} parts of concatenated SMS with ref {ref} from {sender} received. Reassembling...")
+
+                # Reassemble the full message text
+                assembled_parts = []
+                for idx in range(1, entry['total_parts'] + 1):
+                    part_sms = entry['parts'].get(idx)
+                    if part_sms:
+                        assembled_parts.append(part_sms.get_text())
+                    else:
+                        self.l.error(f"Missing part {idx} during reassembly of ref {ref} from {sender}.")
+                        assembled_parts.append("") # Fallback
+
+                assembled_text = "".join(assembled_parts)
+
+                # Create a new reassembled SMS object
+                _sms = sms.SMS(
+                    sms_id=None,
+                    recipient=entry['recipient'],
+                    text=assembled_text,
+                    timestamp=entry['timestamp'],
+                    sender=sender,
+                    receiving_modem=entry['receiving_modem'],
+                    flash=entry['flash']
+                )
+
+                # Remove from buffer
+                del self.received_concat_buffer[key]
+            else:
+                self.l.info(f"Buffered part {num}/{total_parts} of ref {ref} from {sender}. Currently have {len(entry['parts'])}/{entry['total_parts']} parts.")
+                return # Do not deliver the partial segment yet
 
         self.l.info("== SMS message received ==")
 
@@ -327,7 +413,6 @@ class Modem(threading.Thread):
             self.l.info("Modem received expected health SMS")
             # clear value
             self.health_check_expected_token = None
-
 
         # Only log SMS in debug mode and then without content
         self.l.debug(_sms.to_string(content=False))
@@ -1037,7 +1122,7 @@ class Modem(threading.Thread):
                     self._do_send_sms(_sms)
                 except queue.Empty:
                     pass
-                
+
                 # start a health check?
                 self._do_health_check()
 
@@ -1077,6 +1162,18 @@ class MyGsmModem(GsmModem):
                 #    self.l.debug(f"From: {m.group(1)}")
                 _sms = decodeSmsPdu(lines[i + 1])
 
+                # Extract UDH/concatenation info if present
+                udh = _sms.get('udh', [])
+                concat_ref = None
+                concat_parts = None
+                concat_num = None
+                for ie in udh:
+                    if isinstance(ie, Concatenation):
+                        concat_ref = ie.reference
+                        concat_parts = ie.parts
+                        concat_num = ie.number
+                        break
+
                 new_sms = sms.SMS(
                     sms_id=None,
                     recipient=self.gw_modem.get_phone_number(),
@@ -1084,8 +1181,17 @@ class MyGsmModem(GsmModem):
                     sender=_sms['number'] if 'number' in _sms else None,
                     timestamp=_sms['time'] if 'time' in _sms else None,
                     receiving_modem=self.gw_modem,
-                    flash=_sms['protocol_id']==0 if 'protocol_id' in _sms else False
+                    flash=_sms['protocol_id']==0 if 'protocol_id' in _sms else False,
+                    concat_ref=concat_ref,
+                    concat_parts=concat_parts,
+                    concat_num=concat_num,
                 )
+
+                sender_num = new_sms.get_sender()
+                msg_text = new_sms.get_text()
+                if sender_num and msg_text is not None:
+                    self.gw_modem.processed_cmt_signatures[(sender_num, msg_text)] = datetime.datetime.now()
+
                 self.gw_modem._handle_incoming_sms(new_sms)
 
         return super()._handleModemNotification(lines)

@@ -56,6 +56,9 @@ class SMS:
         sender: Optional[str] = None,
         receiving_modem: Optional[Modem] = None,
         flash: bool = False,
+        concat_ref: Optional[int] = None,
+        concat_parts: Optional[int] = None,
+        concat_num: Optional[int] = None,
     ) -> None:
         """
         This class represents an SMS.
@@ -66,6 +69,9 @@ class SMS:
         @param sender: The sender's phone number in international format as string. For received SMS, this is sometimes a human readable string with a name.
         @param receiving_modem: The receiving modem's identifier.
         @param flash: Send SMS as flash message, which should pop up on the destination phone and then disappear.
+        @param concat_ref: CSMS reference number if part of a concatenated SMS.
+        @param concat_parts: Total number of parts in the concatenated SMS.
+        @param concat_num: Sequence number of this part in the concatenated SMS.
         """
         self.sms_id = sms_id if sms_id else str(uuid.uuid4())
         self.recipient = recipient
@@ -75,6 +81,25 @@ class SMS:
         self.sender = sender
         self.receiving_modem = receiving_modem
         self.flash = flash
+        self.concat_ref = concat_ref
+        self.concat_parts = concat_parts
+        self.concat_num = concat_num
+
+    def is_concatenated(self) -> bool:
+        """ Returns status if the SMS is a part of a concatenated SMS. """
+        return self.concat_ref is not None and self.concat_parts is not None and self.concat_num is not None
+
+    def get_concat_ref(self) -> Optional[int]:
+        """ Returns the CSMS reference number. """
+        return self.concat_ref
+
+    def get_concat_parts(self) -> Optional[int]:
+        """ Returns the total number of parts. """
+        return self.concat_parts
+
+    def get_concat_num(self) -> Optional[int]:
+        """ Returns this part's sequence number. """
+        return self.concat_num
 
     def get_timestamp(self) -> datetime.datetime:
         """ Returns the timestamp as Python datetime. """
