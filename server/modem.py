@@ -93,6 +93,55 @@ GsmModem.deleteMultipleStoredSms = locked_method(GsmModem.deleteMultipleStoredSm
 if hasattr(GsmModem, '_GsmModem__threadedHandleModemNotification'):
     GsmModem._GsmModem__threadedHandleModemNotification = locked_method(GsmModem._GsmModem__threadedHandleModemNotification)
 
+_original_handleSmsReceived = GsmModem._handleSmsReceived
+
+@functools.wraps(_original_handleSmsReceived)
+def _patched_handleSmsReceived(self, notificationLine):
+    try:
+        return _original_handleSmsReceived(self, notificationLine)
+    except Exception as e:
+        self.log.error('Error handling received SMS notification %r: %s', notificationLine, e, exc_info=True)
+
+GsmModem._handleSmsReceived = _patched_handleSmsReceived
+
+
+_original_handleSmsStatusReport = GsmModem._handleSmsStatusReport
+
+@functools.wraps(_original_handleSmsStatusReport)
+def _patched_handleSmsStatusReport(self, notificationLine):
+    try:
+        return _original_handleSmsStatusReport(self, notificationLine)
+    except Exception as e:
+        self.log.error('Error handling SMS status report notification %r: %s', notificationLine, e, exc_info=True)
+
+GsmModem._handleSmsStatusReport = _patched_handleSmsStatusReport
+
+
+_original_handleSmsStatusReportTe = GsmModem._handleSmsStatusReportTe
+
+@functools.wraps(_original_handleSmsStatusReportTe)
+def _patched_handleSmsStatusReportTe(self, length, notificationLine):
+    try:
+        return _original_handleSmsStatusReportTe(self, length, notificationLine)
+    except Exception as e:
+        self.log.error('Error handling TE SMS status report notification %r (length %s): %s', notificationLine, length, e, exc_info=True)
+
+GsmModem._handleSmsStatusReportTe = _patched_handleSmsStatusReportTe
+
+
+if hasattr(GsmModem, '_GsmModem__threadedHandleModemNotification'):
+    _original_threadedHandleModemNotification = GsmModem._GsmModem__threadedHandleModemNotification
+
+    @functools.wraps(_original_threadedHandleModemNotification)
+    def _patched_threadedHandleModemNotification(self, *args, **kwargs):
+        try:
+            return _original_threadedHandleModemNotification(self, *args, **kwargs)
+        except Exception as e:
+            self.log.error('Exception in notification handling thread: %s', e, exc_info=True)
+
+    GsmModem._GsmModem__threadedHandleModemNotification = _patched_threadedHandleModemNotification
+
+
 _original_gsm_modem_write = GsmModem.write
 
 @locked_method
