@@ -156,6 +156,7 @@ class SmsGate:
                     if self.config.getboolean("mail", "enabled", fallback=False):
                         self.l.info(f"[{_sms.get_id()}] Try to deliver SMS via E-mail.")
 
+<<<<<<< HEAD
                     # Check if the modem config has a specific recipient
 #                    recipient = _sms.get_receiving_modem().get_modem_config().email_address
 #                    if recipient is None:
@@ -210,11 +211,60 @@ class SmsGate:
                         cur = self.dbstore.cursor()
 
                         self.l.warning("WP5")
+=======
+                        # Check if the modem config has a specific recipient
+                        recipient = _sms.get_receiving_modem().get_modem_config().email_address
+                        if recipient is None:
+                            self.l.debug("Failed to look up recipient's e-mail address in modem config.")
+                            # Otherwise read recipient from main configuration
+                            recipient = self.config.get("mail", "recipient")
+
+                        self.l.debug(f"Will send e-mail to {recipient}.")
+
+                        if self.smtp_delivery.send_mail(recipient, _sms):
+                            self.l.info(f"[{_sms.get_id()}] E-mail was accepted by SMTP server.")
+                        else:
+                            self.l.info(f"[{_sms.get_id()}] There was an error delivering the SMS. Put SMS back into "
+                                        "queue and wait.")
+                            self.delivery_queue.put(_sms)
+
+                            # Update health data: The loop "prefers" delivering mails and deferrs the
+                            # health check until there is nothing to do. This is okay, because when
+                            # mails are delivered, everything seems to be okay. When there is an
+                            # issue and we have to wait anyway, we can perform a health check to let
+                            # the monitoring sooner or later know.
+                            self.smtp_delivery.do_health_check()
+                            time.sleep(30)
+
+                    if self.config.getboolean("dbstore", "enabled", fallback=False):
+                        # check if connection is still valid.
+                        try:
+                             if self.dbstore:
+                               self.dbstore.isolation_level
+                             else:
+                               self.dbstore = psycopg2.connect(
+                                    database=self.config.get("dbstore", "dbname"),
+                                    host=self.config.get("dbstore", "dbhost"),
+                                    user=self.config.get("dbstore", "dbuser"),
+                                    password=self.config.get("dbstore", "dbpass"),
+                                    port=self.config.get("dbstore", "dbport")
+                               )
+                        except Exception as oe:
+                             self.dbstore = psycopg2.connect(
+                                  database=self.config.get("dbstore", "dbname"),
+                                  host=self.config.get("dbstore", "dbhost"),
+                                  user=self.config.get("dbstore", "dbuser"),
+                                  password=self.config.get("dbstore", "dbpass"),
+                                  port=self.config.get("dbstore", "dbport")
+                             )
+                        cur = self.dbstore.cursor()
+
                         sender = _sms.get_sender()
                         if sender.startswith("+"):
                             sender = sender[3:]
                         cur.execute("SELECT c.deal_id FROM communication as c JOIN deal AS d ON d.deal_id = c.deal_id WHERE value ilike '%%' || %s || '%%' order by lost_at DESC", (sender,))
                         dealid = cur.fetchone()
+
                         self.l.warning("WP6")
                         self.l.warning(_sms.to_string())
                         #safe_string = _sms.get_text().encode('utf-8', 'replace').decode('utf-8')
