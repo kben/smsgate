@@ -216,20 +216,20 @@ class SmsGate:
                         cur.execute("SELECT c.deal_id FROM communication as c JOIN deal AS d ON d.deal_id = c.deal_id WHERE value ilike '%%' || %s || '%%' order by lost_at DESC", (sender,))
                         dealid = cur.fetchone()
                         self.l.warning("WP6")
-                        self.l.warning(_sms.to_string().encode('utf-8', 'replace').decode('utf-8'))
-                        safe_string = _sms.get_text().encode('utf-8', 'replace').decode('utf-8')
+                        self.l.warning(_sms.to_string())
+                        #safe_string = _sms.get_text().encode('utf-8', 'replace').decode('utf-8')
 #                        clean_text = _sms.get_text().encode('utf-16', 'surrogatepass').decode('utf-16')
 #                        safe_string = clean_text.encode('utf-8')
                         if dealid != None and len(dealid) > 0:
                             self.l.warning("WP7")
                             self.l.info(f"[{_sms.get_id()}] Try to store SMS into database - assign {dealid[0]}.")
                             cur.execute("INSERT INTO mail_message (id, deal_ids, gthreadid, gmail_auth_id, subject, snippet, body, \"from\", \"to\", mdate) VALUES (%s, '{%s}', %s, %s, %s, %s, null, %s, %s, %s)",
-                                        ("SMS-" + _sms.get_id(), dealid[0], "SMS-" + _sms.get_id(), 0, "SMS", safe_string, _sms.get_sender(), _sms.get_recipient(), _sms.get_timestamp()))
+                                        ("SMS-" + _sms.get_id(), dealid[0], "SMS-" + _sms.get_id(), 0, "SMS", _sms.get_text(), _sms.get_sender(), _sms.get_recipient(), _sms.get_timestamp()))
                         else:
                             self.l.warning("WP8")
                             self.l.info(f"[{_sms.get_id()}] Try to store SMS into database - not assigned. -  (sender).")
                             cur.execute('INSERT INTO mail_message (id, gthreadid, gmail_auth_id, subject, snippet, body, "from", "to", mdate) VALUES (%s, %s, %s, %s, %s, null, %s, %s, %s)',
-                                        ("SMS-" + _sms.get_id(), "SMS-" + _sms.get_id(), 0, "SMS", safe_string, _sms.get_sender(), _sms.get_recipient(), _sms.get_timestamp()))
+                                        ("SMS-" + _sms.get_id(), "SMS-" + _sms.get_id(), 0, "SMS", _sms.get_text(), _sms.get_sender(), _sms.get_recipient(), _sms.get_timestamp()))
                         self.l.warning("WP9")
                         self.dbstore.commit()
                         self.l.warning("WP10")
