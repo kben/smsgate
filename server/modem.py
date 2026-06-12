@@ -69,6 +69,7 @@ _original_gsm_modem_init = GsmModem.__init__
 def _patched_gsm_modem_init(self, *args, **kwargs):
     _original_gsm_modem_init(self, *args, **kwargs)
     self._command_lock = threading.RLock()
+    self._smsRef = random.randint(0, 255)
 
 GsmModem.__init__ = _patched_gsm_modem_init
 
