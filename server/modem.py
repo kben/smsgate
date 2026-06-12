@@ -61,10 +61,41 @@ from gsmmodem.exceptions import (
 from gsmmodem.modem import GsmModem, SerialComms, SentSms, ReceivedSms
 from gsmmodem.pdu import decodeSmsPdu, Concatenation
 
-# Patch GsmModem.write to filter out unsolicited notifications (e.g. +CDSI, +CMTI, etc.)
-# which can interleave command responses under high load and cause parsing failures.
+# Patch GsmModem to serialize all operations and protect multi-step transactions (like SMS sending) from being interleaved by notifications or concurrent commands.
+import functools
+
+_original_gsm_modem_init = GsmModem.__init__
+
+def _patched_gsm_modem_init(self, *args, **kwargs):
+    _original_gsm_modem_init(self, *args, **kwargs)
+    self._command_lock = threading.RLock()
+
+GsmModem.__init__ = _patched_gsm_modem_init
+
+def locked_method(original_method):
+    @functools.wraps(original_method)
+    def wrapper(self, *args, **kwargs):
+        lock = getattr(self, '_command_lock', None)
+        if lock is None:
+            lock = self._command_lock = threading.RLock()
+        with lock:
+            return original_method(self, *args, **kwargs)
+    return wrapper
+
+# Serialize all high-level methods of GsmModem
+GsmModem.sendSms = locked_method(GsmModem.sendSms)
+GsmModem.sendUssd = locked_method(GsmModem.sendUssd)
+GsmModem.readStoredSms = locked_method(GsmModem.readStoredSms)
+GsmModem.deleteStoredSms = locked_method(GsmModem.deleteStoredSms)
+GsmModem.listStoredSms = locked_method(GsmModem.listStoredSms)
+GsmModem.deleteMultipleStoredSms = locked_method(GsmModem.deleteMultipleStoredSms)
+
+if hasattr(GsmModem, '_GsmModem__threadedHandleModemNotification'):
+    GsmModem._GsmModem__threadedHandleModemNotification = locked_method(GsmModem._GsmModem__threadedHandleModemNotification)
+
 _original_gsm_modem_write = GsmModem.write
 
+@locked_method
 def _patched_gsm_modem_write(self, *args, **kwargs):
     waitForResponse = True
     if len(args) > 1:
@@ -107,6 +138,7 @@ def _patched_gsm_modem_write(self, *args, **kwargs):
     return responseLines
 
 GsmModem.write = _patched_gsm_modem_write
+
 
 
 import modemconfig
