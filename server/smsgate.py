@@ -157,28 +157,28 @@ class SmsGate:
                         self.l.info(f"[{_sms.get_id()}] Try to deliver SMS via E-mail.")
 
                     # Check if the modem config has a specific recipient
-                    recipient = _sms.get_receiving_modem().get_modem_config().email_address
-                    if recipient is None:
-                        self.l.debug("Failed to look up recipient's e-mail address in modem config. Reading recipient from main configuration.")
-                        # Otherwise read recipient from main configuration
-                        recipient = self.config.get("mail", "recipient")
-
-                        self.l.debug(f"Will send e-mail to {recipient}.")
-
-                        if self.smtp_delivery.send_mail(recipient, _sms):
-                            self.l.info(f"[{_sms.get_id()}] E-mail was accepted by SMTP server.")
-                        else:
-                            self.l.info(f"[{_sms.get_id()}] There was an error delivering the SMS. Put SMS back into "
-                                        "queue and wait.")
-                            self.delivery_queue.put(_sms)
-
-                            # Update health data: The loop "prefers" delivering mails and deferrs the
-                            # health check until there is nothing to do. This is okay, because when
-                            # mails are delivered, everything seems to be okay. When there is an
-                            # issue and we have to wait anyway, we can perform a health check to let
-                            # the monitoring sooner or later know.
-                            self.smtp_delivery.do_health_check()
-                            time.sleep(30)
+#                    recipient = _sms.get_receiving_modem().get_modem_config().email_address
+#                    if recipient is None:
+#                        self.l.debug("Failed to look up recipient's e-mail address in modem config. Reading recipient from main configuration.")
+#                        # Otherwise read recipient from main configuration
+#                        recipient = self.config.get("mail", "recipient")
+#
+#                        self.l.debug(f"Will send e-mail to {recipient}.")
+#
+#                        if self.smtp_delivery.send_mail(recipient, _sms):
+#                            self.l.info(f"[{_sms.get_id()}] E-mail was accepted by SMTP server.")
+#                        else:
+#                            self.l.info(f"[{_sms.get_id()}] There was an error delivering the SMS. Put SMS back into "
+#                                        "queue and wait.")
+#                            self.delivery_queue.put(_sms)
+#
+#                            # Update health data: The loop "prefers" delivering mails and deferrs the
+#                            # health check until there is nothing to do. This is okay, because when
+#                            # mails are delivered, everything seems to be okay. When there is an
+#                            # issue and we have to wait anyway, we can perform a health check to let
+#                            # the monitoring sooner or later know.
+#                            self.smtp_delivery.do_health_check()
+#                            time.sleep(30)
 
                     if self.config.getboolean("dbstore", "enabled", fallback=False):
                         # check if connection is still valid.
