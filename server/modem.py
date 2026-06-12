@@ -510,6 +510,18 @@ class Modem(threading.Thread):
                     self.l.warning(f"Discarding incomplete concatenated SMS with ref {k[1]} from {k[0]}")
                     del self.received_concat_buffer[k]
 
+            # Active collision / staleness check for this key
+            if key in self.received_concat_buffer:
+                entry = self.received_concat_buffer[key]
+                # If existing session is older than 120s, assume it's stale or a collision
+                if (now - entry['first_seen']).total_seconds() > 120:
+                    self.l.warning(f"Stale session or collision detected for ref {ref} from {sender} (age > 120s). Discarding old incomplete session.")
+                    del self.received_concat_buffer[key]
+                # If part number already exists but content is different, it's a new message collision
+                elif num in entry['parts'] and entry['parts'][num].get_text() != _sms.get_text():
+                    self.l.warning(f"Collision detected for ref {ref} from {sender} (part {num} received with different content). Discarding old incomplete session.")
+                    del self.received_concat_buffer[key]
+
             if key not in self.received_concat_buffer:
                 self.received_concat_buffer[key] = {
                     'parts': {},
