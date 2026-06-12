@@ -75,6 +75,11 @@ class SMS:
         """
         self.sms_id = sms_id if sms_id else str(uuid.uuid4())
         self.recipient = recipient
+        if text is not None:
+            try:
+                text = text.encode("utf-16", "surrogatepass").decode("utf-16")
+            except Exception:
+                pass
         self.text = text
         self.timestamp = timestamp if timestamp else datetime.datetime.now()
         self.created_timestamp = datetime.datetime.now()
