@@ -515,8 +515,8 @@ class Modem(threading.Thread):
             if key in self.received_concat_buffer:
                 entry = self.received_concat_buffer[key]
                 # If existing session is older than 120s, assume it's stale or a collision
-                if (now - entry['first_seen']).total_seconds() > 120:
-                    self.l.warning(f"Stale session or collision detected for ref {ref} from {sender} (age > 120s). Discarding old incomplete session.")
+                if (now - entry['first_seen']).total_seconds() > 600:
+                    self.l.warning(f"Stale session or collision detected for ref {ref} from {sender} (age > 600s). Discarding old incomplete session.")
                     del self.received_concat_buffer[key]
                 # If part number already exists but content is different, it's a new message collision
                 elif num in entry['parts'] and entry['parts'][num].get_text() != _sms.get_text():
