@@ -63,11 +63,35 @@ from gsmmodem.pdu import decodeSmsPdu, Concatenation
 import gsmmodem.pdu
 
 # Patch gsmmodem's encodeUcs2 to natively support surrogate pairs / emojis
-# and prevent ValueError: byte must be in range(0, 256)
+# and prevent ValueError: byte must be in range(0, 256) as well as UnicodeEncodeError
 def _patched_encode_ucs2(text):
-    return bytearray(text.encode("utf-16-be"))
+    return bytearray(text.encode("utf-16-be", "surrogatepass"))
 
 gsmmodem.pdu.encodeUcs2 = _patched_encode_ucs2
+
+
+# Patch gsmmodem's divideTextUcs2 to split based on UTF-16 code units (2 bytes per unit)
+# instead of Python string length to avoid generating over-sized PDUs (>140 bytes) which
+# are rejected by modems/SMSCs.
+def _patched_divide_text_ucs2(plainText):
+    chunks = []
+    current_chunk = []
+    current_units = 0
+    max_units = 67  # MAX_MULTIPART_MESSAGE_LENGTH[0x08]
+    for char in plainText:
+        code_units = len(char.encode("utf-16-be", "surrogatepass")) // 2
+        if current_units + code_units > max_units:
+            chunks.append("".join(current_chunk))
+            current_chunk = [char]
+            current_units = code_units
+        else:
+            current_chunk.append(char)
+            current_units += code_units
+    if current_chunk:
+        chunks.append("".join(current_chunk))
+    return chunks
+
+gsmmodem.pdu.divideTextUcs2 = _patched_divide_text_ucs2
 
 
 # Patch GsmModem to serialize all operations and protect multi-step transactions (like SMS sending) from being interleaved by notifications or concurrent commands.
