@@ -60,6 +60,15 @@ from gsmmodem.exceptions import (
 )
 from gsmmodem.modem import GsmModem, SerialComms, SentSms, ReceivedSms
 from gsmmodem.pdu import decodeSmsPdu, Concatenation
+import gsmmodem.pdu
+
+# Patch gsmmodem's encodeUcs2 to natively support surrogate pairs / emojis
+# and prevent ValueError: byte must be in range(0, 256)
+def _patched_encode_ucs2(text):
+    return bytearray(text.encode("utf-16-be"))
+
+gsmmodem.pdu.encodeUcs2 = _patched_encode_ucs2
+
 
 # Patch GsmModem to serialize all operations and protect multi-step transactions (like SMS sending) from being interleaved by notifications or concurrent commands.
 import functools
