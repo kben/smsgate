@@ -103,7 +103,7 @@ class SmsRouter:
 
                     # c is a modem identifier
                     # Check if the modem is ready, then add itr
-                    state, log = self.modems[c].get_health_state()
+                    state, log = self.modem[c].get_health_state()
                     if state == "OK":
                         candidates.add(c)
 

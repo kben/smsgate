@@ -246,12 +246,13 @@ import serialportmapper
 
 
 class Modem(threading.Thread):
-    def __init__(self, identifier: str, modem_config: modemconfig.ModemConfig, serial_ports_hint_file: str) -> None:
+    def __init__(self, identifier: str, modem_config: modemconfig.ModemConfig, serial_ports_hint_file: str, sms_disk_queue=None) -> None:
         assert identifier is not None
         self.event_available = None
         self.identifier = identifier
         self.modem_config = modem_config
         self.serial_ports_hint_file = serial_ports_hint_file
+        self.sms_disk_queue = sms_disk_queue
 
         self.balance = None
         self.sms_receiver_queue = queue.Queue()
@@ -542,6 +543,9 @@ class Modem(threading.Thread):
                 entry = self.received_concat_buffer[k]
                 if (now - entry['first_seen']).total_seconds() > 3600:
                     self.l.warning(f"Discarding incomplete concatenated SMS with ref {k[1]} from {k[0]}")
+                    if self.sms_disk_queue:
+                        for part_sms in entry['parts'].values():
+                            self.sms_disk_queue.delete_buffered_part(part_sms.get_id())
                     del self.received_concat_buffer[k]
 
             # Active collision / staleness check for this key
@@ -550,10 +554,16 @@ class Modem(threading.Thread):
                 # If existing session is older than 120s, assume it's stale or a collision
                 if (now - entry['first_seen']).total_seconds() > 600:
                     self.l.warning(f"Stale session or collision detected for ref {ref} from {sender} (age > 600s). Discarding old incomplete session.")
+                    if self.sms_disk_queue:
+                        for part_sms in entry['parts'].values():
+                            self.sms_disk_queue.delete_buffered_part(part_sms.get_id())
                     del self.received_concat_buffer[key]
                 # If part number already exists but content is different, it's a new message collision
                 elif num in entry['parts'] and entry['parts'][num].get_text() != _sms.get_text():
                     self.l.warning(f"Collision detected for ref {ref} from {sender} (part {num} received with different content). Discarding old incomplete session.")
+                    if self.sms_disk_queue:
+                        for part_sms in entry['parts'].values():
+                            self.sms_disk_queue.delete_buffered_part(part_sms.get_id())
                     del self.received_concat_buffer[key]
 
             if key not in self.received_concat_buffer:
@@ -571,6 +581,8 @@ class Modem(threading.Thread):
 
             # Store/overwrite the part (handles duplicate delivery gracefully)
             entry['parts'][num] = _sms
+            if self.sms_disk_queue:
+                self.sms_disk_queue.save_buffered_part(_sms)
 
             # Check if all parts have been received
             if len(entry['parts']) == entry['total_parts']:
@@ -598,6 +610,10 @@ class Modem(threading.Thread):
                     receiving_modem=entry['receiving_modem'],
                     flash=entry['flash']
                 )
+
+                if self.sms_disk_queue:
+                    for part_sms in entry['parts'].values():
+                        self.sms_disk_queue.delete_buffered_part(part_sms.get_id())
 
                 # Remove from buffer
                 del self.received_concat_buffer[key]

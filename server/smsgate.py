@@ -55,6 +55,7 @@ import modemconfig
 import modempool
 import rpcserver
 import smtp
+import sms_disk_queue
 
 
 class SmsGate:
@@ -74,9 +75,15 @@ class SmsGate:
 
         self.l = logging.getLogger("SmsGate")
 
+        self.disk_queue = sms_disk_queue.SMSDiskQueue(self.config)
+
         # initialize sub-modules
         self._init_delivery()
         self._init_pool()
+
+        # Restore any pending messages from disk
+        self._restore_disk_queues()
+
         self._init_rpcserver()
 
     @staticmethod
@@ -238,6 +245,8 @@ class SmsGate:
                         cur.close()
                         self.l.warning("WP11")
 
+                    self.disk_queue.delete_queued_sms(_sms.get_id())
+
             except queue.Empty:
                 self.l.debug(
                     "_do_delivery(): No SMS in queue. Checking if health check should be run."
@@ -261,6 +270,50 @@ class SmsGate:
             except:
                 self.l.warning("_do_delivery(): Unknown exception.")
                 traceback.print_exc()
+
+    def _restore_disk_queues(self) -> None:
+        self.l.info("Restoring pending SMS from disk queue...")
+        # 1. Restore queued SMS
+        try:
+            queued_sms_list = self.disk_queue.load_all_queued_sms(self.pool)
+            for s in queued_sms_list:
+                self.l.info(f"[{s.get_id()}] Restoring queued SMS from disk to delivery queue.")
+                self.delivery_queue.put(s)
+        except Exception as e:
+            self.l.error(f"Error restoring queued SMS from disk: {e}")
+
+        # 2. Restore buffered parts of concatenated SMS
+        try:
+            parts = self.disk_queue.load_all_buffered_parts(self.pool)
+            for p in parts:
+                receiving_modem = p.get_receiving_modem()
+                if receiving_modem:
+                    sender = p.get_sender() or "unknown"
+                    ref = p.get_concat_ref()
+                    num = p.get_concat_num()
+                    total_parts = p.get_concat_parts()
+
+                    if ref is not None and num is not None and total_parts is not None:
+                        key = (sender, ref)
+                        if not hasattr(receiving_modem, "received_concat_buffer"):
+                            receiving_modem.received_concat_buffer = {}
+
+                        if key not in receiving_modem.received_concat_buffer:
+                            receiving_modem.received_concat_buffer[key] = {
+                                'parts': {},
+                                'total_parts': total_parts,
+                                'first_seen': p.get_timestamp(),
+                                'recipient': p.get_recipient(),
+                                'receiving_modem': receiving_modem,
+                                'flash': p.is_flash(),
+                                'timestamp': p.get_timestamp(),
+                            }
+
+                        entry = receiving_modem.received_concat_buffer[key]
+                        entry['parts'][num] = p
+                        self.l.info(f"Restored buffered part {num}/{total_parts} of ref {ref} from {sender} for modem {receiving_modem.get_identifier()}")
+        except Exception as e:
+            self.l.error(f"Error restoring buffered partial SMS from disk: {e}")
 
     def _init_pool(self) -> bool:
         """
@@ -298,7 +351,7 @@ class SmsGate:
                 self.l.info(f"[{identifier}] Initializing modem {identifier}.")
                 for i in range(0, 3):
                     try:
-                        gsmmodem = modem.Modem(identifier, modem_conf, self.config.get("modempool", "serial_ports_hint_file"))
+                        gsmmodem = modem.Modem(identifier, modem_conf, self.config.get("modempool", "serial_ports_hint_file"), sms_disk_queue=self.disk_queue)
                         if gsmmodem:
                             gsmmodem.set_event_thread(
                                 self.event_available
@@ -353,6 +406,7 @@ class SmsGate:
 
                     if self.config.getboolean("mail", "enabled", fallback=False) or self.config.getboolean("dbstore", "enabled", fallback=False):
                         self.l.debug(f"[{sms.get_id()}] Put SMS into outgoing queue.")
+                        self.disk_queue.save_queued_sms(sms)
                         self.delivery_queue.put(sms)
 
                 else:
