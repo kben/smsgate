@@ -1320,7 +1320,7 @@ class Modem(threading.Thread):
         """
         Modem run loop
         """
-        seconds_between_calls = 15
+        seconds_between_calls = 1
 
         while True:
 
