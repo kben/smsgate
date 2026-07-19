@@ -228,6 +228,10 @@ def _patched_gsm_modem_write(self, *args, **kwargs):
     elif 'waitForResponse' in kwargs:
         waitForResponse = kwargs['waitForResponse']
 
+    # Decrease default SMS sending timeout from 35s to 15s to fail/retry faster
+    if kwargs.get('writeTerm') == '\x1a' and kwargs.get('timeout') == 35:
+        kwargs['timeout'] = 15
+
     responseLines = _original_gsm_modem_write(self, *args, **kwargs)
     if waitForResponse and responseLines:
         filteredResponseLines = []
