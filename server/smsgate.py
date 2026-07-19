@@ -392,9 +392,10 @@ class SmsGate:
         The method waits for events, checks for incoming SMS that should be forwarded via SMTP, it also checks for
         outgoing SMS and triggers health checks.
         """
-        while True:
+        # Trigger an initial check on startup to process any restored/pending SMS immediately
+        self.event_available.set()
 
-            self.event_available.clear()
+        while True:
 
             self.l.info("Waiting for next event ...")
             if self.event_available.wait(
