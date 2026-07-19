@@ -150,6 +150,9 @@ def _patched_handleSmsReceived(self, notificationLine):
             else:
                 self.log.error('Error handling received SMS notification %r: %s', notificationLine, e, exc_info=True)
                 break
+        except (TimeoutException, serial.SerialException, AttributeError) as e:
+            self.log.warning('Modem connection lost or closed while handling received SMS notification %r: %s', notificationLine, e)
+            break
         except Exception as e:
             self.log.error('Error handling received SMS notification %r: %s', notificationLine, e, exc_info=True)
             break
@@ -174,6 +177,9 @@ def _patched_handleSmsStatusReport(self, notificationLine):
             else:
                 self.log.error('Error handling SMS status report notification %r: %s', notificationLine, e, exc_info=True)
                 break
+        except (TimeoutException, serial.SerialException, AttributeError) as e:
+            self.log.warning('Modem connection lost or closed while handling SMS status report notification %r: %s', notificationLine, e)
+            break
         except Exception as e:
             self.log.error('Error handling SMS status report notification %r: %s', notificationLine, e, exc_info=True)
             break
@@ -198,6 +204,9 @@ def _patched_handleSmsStatusReportTe(self, length, notificationLine):
             else:
                 self.log.error('Error handling TE SMS status report notification %r (length %s): %s', notificationLine, length, e, exc_info=True)
                 break
+        except (TimeoutException, serial.SerialException, AttributeError) as e:
+            self.log.warning('Modem connection lost or closed while handling TE SMS status report notification %r: %s', notificationLine, e)
+            break
         except Exception as e:
             self.log.error('Error handling TE SMS status report notification %r (length %s): %s', notificationLine, length, e, exc_info=True)
             break
