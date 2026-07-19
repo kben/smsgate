@@ -132,15 +132,22 @@ _original_handleSmsReceived = GsmModem._handleSmsReceived
 
 @functools.wraps(_original_handleSmsReceived)
 def _patched_handleSmsReceived(self, notificationLine):
-    try:
-        return _original_handleSmsReceived(self, notificationLine)
-    except CmsError as e:
-        if e.code == 321:
-            self.log.warning('SMS message at index already cleared or invalid (CMS 321) for notification %r', notificationLine)
-        else:
+    for attempt in range(3):
+        try:
+            return _original_handleSmsReceived(self, notificationLine)
+        except CmsError as e:
+            if e.code == 321:
+                if attempt < 2:
+                    self.log.debug('SMS message at index invalid (CMS 321) on attempt %d; retrying in 200ms...', attempt + 1)
+                    time.sleep(0.2)
+                    continue
+                self.log.warning('SMS message at index already cleared or invalid (CMS 321) for notification %r', notificationLine)
+            else:
+                self.log.error('Error handling received SMS notification %r: %s', notificationLine, e, exc_info=True)
+                break
+        except Exception as e:
             self.log.error('Error handling received SMS notification %r: %s', notificationLine, e, exc_info=True)
-    except Exception as e:
-        self.log.error('Error handling received SMS notification %r: %s', notificationLine, e, exc_info=True)
+            break
 
 GsmModem._handleSmsReceived = _patched_handleSmsReceived
 
@@ -149,15 +156,22 @@ _original_handleSmsStatusReport = GsmModem._handleSmsStatusReport
 
 @functools.wraps(_original_handleSmsStatusReport)
 def _patched_handleSmsStatusReport(self, notificationLine):
-    try:
-        return _original_handleSmsStatusReport(self, notificationLine)
-    except CmsError as e:
-        if e.code == 321:
-            self.log.warning('SMS status report at index already cleared or invalid (CMS 321) for notification %r', notificationLine)
-        else:
+    for attempt in range(3):
+        try:
+            return _original_handleSmsStatusReport(self, notificationLine)
+        except CmsError as e:
+            if e.code == 321:
+                if attempt < 2:
+                    self.log.debug('SMS status report at index invalid (CMS 321) on attempt %d; retrying in 200ms...', attempt + 1)
+                    time.sleep(0.2)
+                    continue
+                self.log.warning('SMS status report at index already cleared or invalid (CMS 321) for notification %r', notificationLine)
+            else:
+                self.log.error('Error handling SMS status report notification %r: %s', notificationLine, e, exc_info=True)
+                break
+        except Exception as e:
             self.log.error('Error handling SMS status report notification %r: %s', notificationLine, e, exc_info=True)
-    except Exception as e:
-        self.log.error('Error handling SMS status report notification %r: %s', notificationLine, e, exc_info=True)
+            break
 
 GsmModem._handleSmsStatusReport = _patched_handleSmsStatusReport
 
@@ -166,15 +180,22 @@ _original_handleSmsStatusReportTe = GsmModem._handleSmsStatusReportTe
 
 @functools.wraps(_original_handleSmsStatusReportTe)
 def _patched_handleSmsStatusReportTe(self, length, notificationLine):
-    try:
-        return _original_handleSmsStatusReportTe(self, length, notificationLine)
-    except CmsError as e:
-        if e.code == 321:
-            self.log.warning('TE SMS status report at index already cleared or invalid (CMS 321) for notification %r', notificationLine)
-        else:
+    for attempt in range(3):
+        try:
+            return _original_handleSmsStatusReportTe(self, length, notificationLine)
+        except CmsError as e:
+            if e.code == 321:
+                if attempt < 2:
+                    self.log.debug('TE SMS status report at index invalid (CMS 321) on attempt %d; retrying in 200ms...', attempt + 1)
+                    time.sleep(0.2)
+                    continue
+                self.log.warning('TE SMS status report at index already cleared or invalid (CMS 321) for notification %r', notificationLine)
+            else:
+                self.log.error('Error handling TE SMS status report notification %r (length %s): %s', notificationLine, length, e, exc_info=True)
+                break
+        except Exception as e:
             self.log.error('Error handling TE SMS status report notification %r (length %s): %s', notificationLine, length, e, exc_info=True)
-    except Exception as e:
-        self.log.error('Error handling TE SMS status report notification %r (length %s): %s', notificationLine, length, e, exc_info=True)
+            break
 
 GsmModem._handleSmsStatusReportTe = _patched_handleSmsStatusReportTe
 
