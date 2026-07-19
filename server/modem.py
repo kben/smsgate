@@ -1396,17 +1396,22 @@ class Modem(threading.Thread):
                 # start a health check?
                 self._do_health_check()
 
-            except (
-                    TimeoutException,
-                    serial.serialutil.PortNotOpenError,
-                    Exception,
-            ) as e:
+            except (TimeoutException, serial.serialutil.PortNotOpenError, serial.SerialException) as e:
                 self.l.error(
-                    "Timeout occurred or modem lost. Reinitializing modem. Exception was:"
-                    + str(e)
+                    "Timeout occurred or modem lost. Reinitializing modem. Exception was: %s", e
+                )
+                self.status = "Timeout."
+                self.close()
+
+                self.sms_sender_queue.put(_sms)
+                self._do_health_check(do_now=True)
+
+            except Exception as e:
+                self.l.error(
+                    "Unexpected error in modem runner. Exception was: %s", e
                 )
                 traceback.print_exc()
-                self.status = "Timeout."
+                self.status = "Error."
                 self.close()
 
                 self.sms_sender_queue.put(_sms)
