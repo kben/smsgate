@@ -63,6 +63,11 @@ from gsmmodem.modem import GsmModem, SerialComms, SentSms, ReceivedSms
 from gsmmodem.pdu import decodeSmsPdu, Concatenation
 import gsmmodem.pdu
 
+# Patch GsmModem class-level regexes to prevent AttributeError/NoneType match errors
+GsmModem.CMGR_SM_DELIVER_REGEX_TEXT = re.compile(r'^\+CMGR: "([^"]+)","([^"]+)",[^,]*,"([^"]+)"$')
+GsmModem.CMGR_SM_REPORT_REGEXT_TEXT = re.compile(r'^\+CMGR: ([^,]*),\d+,(\d+),"{0,1}([^"]*)"{0,1},\d*,"([^"]+)","([^"]+)",(\d+)$')
+GsmModem.CMGR_REGEX_PDU = re.compile(r'^\+CMGR:\s*(\d*),\s*"{0,1}([^"]*)"{0,1},\s*(\d+)$')
+
 # Patch gsmmodem's encodeUcs2 to natively support surrogate pairs / emojis
 # and prevent ValueError: byte must be in range(0, 256) as well as UnicodeEncodeError
 def _patched_encode_ucs2(text):
