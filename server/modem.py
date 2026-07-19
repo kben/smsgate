@@ -1188,6 +1188,8 @@ class Modem(threading.Thread):
                 waitForDeliveryReport=False,
                 sendFlash=_sms.is_flash()
             )
+            if self.sms_disk_queue:
+                self.sms_disk_queue.delete_outgoing_sms(_sms.get_id())
             return True
         except (CmsError, CmeError, CommandError) as e:
             self.l.error(f"Error: Failed to send SMS due to modem/network error: {e}")

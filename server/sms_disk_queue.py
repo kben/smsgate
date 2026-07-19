@@ -166,3 +166,42 @@ class SMSDiskQueue:
                 except Exception as e:
                     self.l.error(f"Failed to load queued SMS from file {filepath}: {e}")
         return queued
+
+    def save_outgoing_sms(self, sms_obj: sms.SMS) -> None:
+        """Save an outgoing SMS waiting to be sent to disk."""
+        filepath = os.path.join(self.queue_dir, f"outgoing_{sms_obj.get_id()}.json")
+        try:
+            data = self._sms_to_dict(sms_obj)
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self.l.debug(f"Successfully saved outgoing SMS {sms_obj.get_id()} to {filepath}")
+        except Exception as e:
+            self.l.error(f"Failed to save outgoing SMS {sms_obj.get_id()} to disk: {e}")
+
+    def delete_outgoing_sms(self, sms_id: str) -> None:
+        """Delete a saved outgoing SMS from disk after successful transmission."""
+        filepath = os.path.join(self.queue_dir, f"outgoing_{sms_id}.json")
+        if os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+                self.l.debug(f"Deleted outgoing SMS file: {filepath}")
+            except Exception as e:
+                self.l.error(f"Failed to delete outgoing SMS file {filepath}: {e}")
+
+    def load_all_outgoing_sms(self, modems_pool=None) -> list:
+        """Load and return all outgoing SMS saved on disk."""
+        outgoing = []
+        if not os.path.exists(self.queue_dir):
+            return outgoing
+
+        for filename in os.listdir(self.queue_dir):
+            if filename.startswith("outgoing_") and filename.endswith(".json"):
+                filepath = os.path.join(self.queue_dir, filename)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    _sms = self._dict_to_sms(data, modems_pool)
+                    outgoing.append(_sms)
+                except Exception as e:
+                    self.l.error(f"Failed to load outgoing SMS from file {filepath}: {e}")
+        return outgoing

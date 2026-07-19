@@ -196,6 +196,8 @@ class ModemPool:
         @param sms: An SMS object, which contains the destination number and the message text.
         @return: Returns the SMS ID (a UUID) as string. You may use this information to later check the delivery status.
         """
+        if hasattr(self, 'disk_queue') and self.disk_queue:
+            self.disk_queue.save_outgoing_sms(sms)
         self.sms_queue_out.put(sms)
         self.event_available.set()
         return sms.get_id()

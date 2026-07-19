@@ -315,6 +315,17 @@ class SmsGate:
         except Exception as e:
             self.l.error(f"Error restoring buffered partial SMS from disk: {e}")
 
+        # 3. Restore outgoing SMS (for sending)
+        try:
+            outgoing_sms_list = self.disk_queue.load_all_outgoing_sms(self.pool)
+            for s in outgoing_sms_list:
+                self.l.info(f"[{s.get_id()}] Restoring outgoing SMS from disk to sending queue.")
+                self.pool.sms_queue_out.put(s)
+            if outgoing_sms_list:
+                self.event_available.set()
+        except Exception as e:
+            self.l.error(f"Error restoring outgoing SMS from disk: {e}")
+
     def _init_pool(self) -> bool:
         """
         Initializes the modem pool.
@@ -324,6 +335,7 @@ class SmsGate:
             "modempool", "health_check_interval", fallback=600
         )
         self.pool = modempool.ModemPool(health_check_interval)
+        self.pool.disk_queue = self.disk_queue
         self.pool.set_event_thread(self.event_available)
 
         sim_config = SmsGate.read_sim_config()
