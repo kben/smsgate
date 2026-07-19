@@ -57,6 +57,7 @@ from gsmmodem.exceptions import (
     GsmModemException,
     CmeError,
     CmsError,
+    CommandError,
 )
 from gsmmodem.modem import GsmModem, SerialComms, SentSms, ReceivedSms
 from gsmmodem.pdu import decodeSmsPdu, Concatenation
@@ -1158,8 +1159,14 @@ class Modem(threading.Thread):
                 sendFlash=_sms.is_flash()
             )
             return True
-        except TimeoutException:
-            self.l.error(f"Error: Failed to send SMS.")
+        except (CmsError, CmeError, CommandError) as e:
+            self.l.error(f"Error: Failed to send SMS due to modem/network error: {e}")
+            retry_delay = getattr(_sms, 'retry_delay', 5)
+            self.l.info(f"Retrying sending SMS to {_sms.get_recipient()} in {retry_delay} seconds (will retry forever).")
+            time.sleep(retry_delay)
+            # Exponential backoff up to 60 seconds
+            _sms.retry_delay = min(retry_delay * 2, 60)
+            self.sms_sender_queue.put(_sms)
 
         return False
 

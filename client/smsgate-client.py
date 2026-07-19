@@ -48,8 +48,9 @@ import time
 
 def create_client(host, port, ca_file):
     context = ssl.create_default_context()
-    context.load_verify_locations(ca_file)
-    return xmlrpc.client.ServerProxy("https://%s:%d" % (host, port), context=context)
+    if ca_file:
+        context.load_verify_locations(ca_file)
+    return xmlrpc.client.ServerProxy("https://%s:%d" % (host, port), context=context, allow_none=True)
     
 def send_ussd(host, port, ca_file, api_token, sender, ussd_code):
 
@@ -169,9 +170,9 @@ def main():
     
     args = cmd_parser()
     
-    api_token = os.getenv("SMSGATE_APITOKEN", args.api_token)
+    api_token = os.getenv("SMSGATE_APITOKEN", args.api_token) or ""
     ca_file = args.ca if "ca" in args else None
-    sender = args.sender
+    sender = args.sender or ""
     
     try:
         if 'ussd' in args:
