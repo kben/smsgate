@@ -48,7 +48,7 @@ import bcrypt
 
 
 def cleanup_phone_number(phone_number: str) -> Optional[str]:
-    """
+    r"""
     This function cleans up phone numbers and removes seperator characters and implements a very basic
     phone number check.
 
@@ -61,8 +61,8 @@ def cleanup_phone_number(phone_number: str) -> Optional[str]:
     phone number in the before-mentioned format or returns None.
     """
 
-    phone_number = re.sub("[^\+\d]", "", phone_number)
-    if re.match("^\+\d+$", phone_number):
+    phone_number = re.sub(r"[^\+\d]", "", phone_number)
+    if re.match(r"^\+\d+$", phone_number):
         return phone_number
     else:
         return None
