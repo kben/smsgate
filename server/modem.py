@@ -38,6 +38,7 @@
 import binascii
 import datetime
 import glob
+import helper
 import logging
 import queue
 import random
@@ -519,12 +520,12 @@ class Modem(threading.Thread):
         The _sms parameter is a gsmmodem.modem.ReceivedSms.
         """
         # If this message was already processed in _handleModemNotification, skip it
-        now = datetime.datetime.now()
+        now = helper.ensure_aware(datetime.datetime.now())
 
         # Clean up entries older than 30 seconds to prevent memory leaks
         self.processed_cmt_signatures = {
             k: ts for k, ts in self.processed_cmt_signatures.items()
-            if (now - ts).total_seconds() < 30
+            if (now - helper.ensure_aware(ts)).total_seconds() < 30
         }
 
         sig = (_sms.number, _sms.text)
@@ -564,7 +565,7 @@ class Modem(threading.Thread):
         Handle incoming SMS.
         The _sms parameter is a sms.SMS object.
         """
-        now = datetime.datetime.now()
+        now = helper.ensure_aware(datetime.datetime.now())
 
         # If this is a concatenated SMS, we buffer and track its parts
         if _sms.is_concatenated():
@@ -581,7 +582,8 @@ class Modem(threading.Thread):
             # Clean up ancient incomplete sessions (older than 1 hour)
             for k in list(self.received_concat_buffer.keys()):
                 entry = self.received_concat_buffer[k]
-                if (now - entry['first_seen']).total_seconds() > 3600:
+                first_seen = helper.ensure_aware(entry['first_seen'])
+                if (now - first_seen).total_seconds() > 3600:
                     self.l.warning(f"Discarding incomplete concatenated SMS with ref {k[1]} from {k[0]}")
                     if self.sms_disk_queue:
                         for part_sms in entry['parts'].values():
@@ -591,8 +593,9 @@ class Modem(threading.Thread):
             # Active collision / staleness check for this key
             if key in self.received_concat_buffer:
                 entry = self.received_concat_buffer[key]
+                first_seen = helper.ensure_aware(entry['first_seen'])
                 # If existing session is older than 120s, assume it's stale or a collision
-                if (now - entry['first_seen']).total_seconds() > 600:
+                if (now - first_seen).total_seconds() > 600:
                     self.l.warning(f"Stale session or collision detected for ref {ref} from {sender} (age > 600s). Discarding old incomplete session.")
                     if self.sms_disk_queue:
                         for part_sms in entry['parts'].values():
@@ -779,10 +782,12 @@ class Modem(threading.Thread):
         This method checks if performing a health check is necessary and will act accordingly.
         @param do_now: Boolean flag to force a health check.
         """
-        if ((self.last_health_check is None)
+        now = helper.ensure_aware(datetime.datetime.now())
+        last_hc = helper.ensure_aware(self.last_health_check) if self.last_health_check else None
+        if ((last_hc is None)
             or do_now
             or (self.health_state != "OK")
-            or ((datetime.datetime.now() - self.last_health_check).total_seconds()
+            or ((now - last_hc).total_seconds()
                     >= self.modem_config.health_check_interval)):
             self.health_state, self.health_logs = self._really_do_health_check()
 
@@ -1466,7 +1471,7 @@ class MyGsmModem(GsmModem):
                 sender_num = new_sms.get_sender()
                 msg_text = new_sms.get_text()
                 if sender_num and msg_text is not None:
-                    self.gw_modem.processed_cmt_signatures[(sender_num, msg_text)] = datetime.datetime.now()
+                    self.gw_modem.processed_cmt_signatures[(sender_num, msg_text)] = helper.ensure_aware(datetime.datetime.now())
 
                 self.gw_modem._handle_incoming_sms(new_sms)
 

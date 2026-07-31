@@ -37,6 +37,7 @@
 # -----------------------------------------------------------------------------
 
 import datetime
+import helper
 import logging
 import smtplib
 import ssl
@@ -113,11 +114,12 @@ class SMTPDelivery:
             "OK", "WARNING" or "CRITICAL" and indicates the health state. The most severe level is reported. The
             second element is a string-concatenation of log messages or maybe an empty string if everything is okay.
         """
-        now = datetime.datetime.now()
-        if (now - self.last_health_check).total_seconds() >= self.health_check_interval:
+        now = helper.ensure_aware(datetime.datetime.now())
+        last_hc = helper.ensure_aware(self.last_health_check) if self.last_health_check else None
+        if last_hc is None or (now - last_hc).total_seconds() >= self.health_check_interval:
 
             exception_occurred = False
-            self.last_health_check = datetime.datetime.now()
+            self.last_health_check = helper.ensure_aware(datetime.datetime.now())
             self.l.info("Collecting health check infos from SMTP server.")
 
             for i in range(1, 3):

@@ -37,6 +37,7 @@
 # -----------------------------------------------------------------------------
 
 import datetime
+import helper
 import logging
 import queue
 import threading
@@ -112,12 +113,13 @@ class ModemPool:
         @return: Returns the modem's internal health state as tuple of State, Message. State is either "OK", "WARNING",
             or "CRITICAL". Message is a human-readable string giving details about the issue. Message may be a None.
         """
-        now = datetime.datetime.now()
+        now = helper.ensure_aware(datetime.datetime.now())
+        last_hc = helper.ensure_aware(self.last_health_check) if self.last_health_check else None
         if (
-            (self.last_health_check is None)
+            (last_hc is None)
             or (self.health_state != "OK")
             or (
-                (now - self.last_health_check).total_seconds()
+                (now - last_hc).total_seconds()
                 >= self.health_check_interval
             )
         ):

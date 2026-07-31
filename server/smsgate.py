@@ -288,7 +288,7 @@ class SmsGate:
                             receiving_modem.received_concat_buffer[key] = {
                                 'parts': {},
                                 'total_parts': total_parts,
-                                'first_seen': p.get_timestamp(),
+                                'first_seen': helper.ensure_aware(p.get_timestamp()),
                                 'recipient': p.get_recipient(),
                                 'receiving_modem': receiving_modem,
                                 'flash': p.is_flash(),

@@ -36,6 +36,7 @@
 #  due to the matter of *national* security concerns.
 # -----------------------------------------------------------------------------
 
+import datetime
 import logging
 import os
 import re
@@ -142,3 +143,16 @@ def check_token_in_list(token: str, token_list: List[str]) -> bool:
         if check_password(token, t):
             return True
     return False
+
+
+def ensure_aware(dt: Optional[datetime.datetime]) -> Optional[datetime.datetime]:
+    """
+    Ensures that a datetime object is timezone-aware.
+    If dt is timezone-naive, it is converted to a timezone-aware datetime in the local timezone.
+    If dt is already timezone-aware or None, it is returned unchanged.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        return dt.astimezone()
+    return dt

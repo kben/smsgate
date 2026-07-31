@@ -39,6 +39,7 @@
 from __future__ import annotations
 
 import datetime
+import helper
 import uuid
 from typing import TYPE_CHECKING, Optional
 
@@ -81,8 +82,8 @@ class SMS:
             except Exception:
                 pass
         self.text = text
-        self.timestamp = timestamp if timestamp else datetime.datetime.now()
-        self.created_timestamp = datetime.datetime.now()
+        self.timestamp = helper.ensure_aware(timestamp) if timestamp else helper.ensure_aware(datetime.datetime.now())
+        self.created_timestamp = helper.ensure_aware(datetime.datetime.now())
         self.sender = sender
         self.receiving_modem = receiving_modem
         self.flash = flash
@@ -112,7 +113,8 @@ class SMS:
 
     def get_age(self) -> datetime.timedelta:
         """ Returns the age as Python timedelta. """
-        return datetime.datetime.now(datetime.timezone.utc) - self.timestamp
+        ts = helper.ensure_aware(self.timestamp)
+        return datetime.datetime.now(datetime.timezone.utc) - ts
 
     def get_id(self) -> str:
         """ Returns the SMS ID, which is a UUID string. """
