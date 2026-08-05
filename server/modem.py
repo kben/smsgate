@@ -238,10 +238,6 @@ def _patched_gsm_modem_write(self, *args, **kwargs):
     elif 'waitForResponse' in kwargs:
         waitForResponse = kwargs['waitForResponse']
 
-    # Decrease default SMS sending timeout from 35s to 15s to fail/retry faster
-    if kwargs.get('writeTerm') == '\x1a' and kwargs.get('timeout') == 35:
-        kwargs['timeout'] = 15
-
     responseLines = _original_gsm_modem_write(self, *args, **kwargs)
     if waitForResponse and responseLines:
         filteredResponseLines = []
@@ -255,7 +251,7 @@ def _patched_gsm_modem_write(self, *args, **kwargs):
                 unsolicitedLines.append(line)
                 next_line_is_pdu = False
                 is_unsolicited = True
-            elif line.startswith('+CMTI') or line.startswith('+CDSI') or line.startswith('+DTMF') or 'RING' in line:
+            elif line.startswith(('+CMTI', '+CDSI', '+DTMF', '+Z', '^', '+WIND', '+STIN', '+CRING', '+CREG:', '+CGREG:', '+CEREG:')) or 'RING' in line:
                 unsolicitedLines.append(line)
                 is_unsolicited = True
             elif line.startswith('+CDS') or line.startswith('+CMT'):
