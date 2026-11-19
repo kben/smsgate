@@ -144,6 +144,38 @@ class TestDeliveryReport(unittest.TestCase):
         self.assertIn("failed", modem.delivery_status_text(68))
 
 
+class TestMultipart(unittest.TestCase):
+
+    def test_long_login_link_has_two_parts(self):
+        link = "https://app.example.de/mitarbeiter/?token=" + "x" * 170
+        self.assertEqual(modem.part_count("+491774812002", link), 2)
+        self.assertEqual(modem.part_count("+491774812002", "Hallo"), 1)
+
+    def test_part_references_count_back_and_wrap(self):
+        self.assertEqual(modem.part_references(5, 2), [4, 5])
+        self.assertEqual(modem.part_references(0, 2), [255, 0])
+        self.assertEqual(modem.part_references(9, 1), [9])
+
+    def test_both_parts_are_logged_with_sms_id(self):
+        link = "https://app.example.de/mitarbeiter/?token=" + "x" * 170
+        m = bare_modem(FakeGsm(reference=5))
+        s = sms.SMS(sms_id=None, recipient="+491774812002", text=link, sender="")
+        self.assertTrue(m._do_send_sms(s))
+
+        class Report:
+            number = "+491774812002"
+            deliveryStatus = 0
+            timeSent = None
+            timeFinalized = None
+
+        for ref, teil in ((4, "part 1/2"), (5, "part 2/2")):
+            r = Report()
+            r.reference = ref
+            with self.assertLogs("test-modem", level="INFO") as logs:
+                m._handle_status_report(r)
+            self.assertTrue(any(s.get_id() in line and teil in line for line in logs.output), logs.output)
+
+
 class TestHealthState(unittest.TestCase):
 
     def test_dead_sending_thread_is_critical(self):

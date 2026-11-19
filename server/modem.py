@@ -312,6 +312,22 @@ def delivery_status_text(status: Optional[int]) -> str:
     return f"delivery failed (status {status})"
 
 
+def part_count(recipient: str, text: str) -> int:
+    """Number of PDUs (parts) the library sends for this text — same encoding as GsmModem.sendSms."""
+    try:
+        return max(1, len(gsmmodem.pdu.encodeSmsSubmitPdu(recipient, text or "")))
+    except Exception:
+        return 1
+
+
+def part_references(last_reference: int, parts: int) -> List[int]:
+    """
+    Network references of all parts of a multipart SMS. sendSms only returns the reference of the last part; the
+    modem numbers the parts consecutively (mod 256), so the earlier parts are the references before it.
+    """
+    return [(last_reference - parts + 1 + i) % 256 for i in range(parts)]
+
+
 def retry_decision(age_seconds: float, error: Exception, last_delay: Optional[float]) -> Tuple[bool, float]:
     """
     Decide what happens with an SMS whose sending failed.
@@ -1247,10 +1263,14 @@ class Modem(threading.Thread):
             or given up (permanent error, too old). Timeouts and lost modems propagate to run().
         """
         started = time.time()
+        parts = part_count(_sms.get_recipient(), _sms.get_text())
         try:
             # sendSms returns a SentSms object
             self.status = "Send SMS."
-            self.l.info(f"[{_sms.get_id()}] Sending SMS to {_sms.get_recipient()}.")
+            self.l.info(
+                f"[{_sms.get_id()}] Sending SMS to {_sms.get_recipient()} ({parts} part{'s' if parts > 1 else ''}, "
+                f"waited {_sms.get_age().total_seconds():.0f} s in the queue)."
+            )
             sent = self.modem.sendSms(
                 _sms.get_recipient(), _sms.get_text(),
                 waitForDeliveryReport=False,
@@ -1260,10 +1280,10 @@ class Modem(threading.Thread):
             reference = getattr(sent, "reference", None)
             self.l.info(
                 f"[{_sms.get_id()}] SMS to {_sms.get_recipient()} accepted by the network after "
-                f"{time.time() - started:.1f} s (reference {reference}, queued {_sms.get_age().total_seconds():.0f} s ago)."
+                f"{time.time() - started:.1f} s (reference {reference}{f', {parts} parts' if parts > 1 else ''})."
             )
             if reference is not None:
-                self._remember_reference(reference, _sms)
+                self._remember_reference(reference, _sms, parts)
             if self.sms_disk_queue:
                 self.sms_disk_queue.delete_outgoing_sms(_sms.get_id())
             return True
@@ -1306,14 +1326,18 @@ class Modem(threading.Thread):
             return 60
         return max(0.5, min(60, min(entry[0] for entry in self.retry_sms) - now))
 
-    def _remember_reference(self, reference: int, _sms: sms.SMS) -> None:
-        """Keep the network reference of an accepted SMS to log its delivery report, drop old entries."""
+    def _remember_reference(self, reference: int, _sms: sms.SMS, parts: int = 1) -> None:
+        """
+        Keep the network references of an accepted SMS (all parts) to log their delivery reports, drop old entries.
+        Entry: (sms_id, recipient, accepted at, part number, parts).
+        """
         now = time.time()
         self.sent_by_reference = {
             ref: entry for ref, entry in self.sent_by_reference.items()
             if now - entry[2] < DELIVERY_REPORT_KEEP_SECONDS
         }
-        self.sent_by_reference[reference] = (_sms.get_id(), _sms.get_recipient(), now)
+        for nr, ref in enumerate(part_references(reference, parts), start=1):
+            self.sent_by_reference[ref] = (_sms.get_id(), _sms.get_recipient(), now, nr, parts)
 
     def _handle_status_report(self, report) -> None:
         """
@@ -1321,7 +1345,8 @@ class Modem(threading.Thread):
         why not. timeSent = SMSC received the SMS, timeFinalized = delivered / finally failed.
         """
         entry = self.sent_by_reference.get(report.reference)
-        sms_id, recipient, accepted = entry if entry else ("unknown", report.number, None)
+        sms_id, recipient, accepted, nr, parts = entry if entry else ("unknown", report.number, None, 1, 1)
+        part_info = f"part {nr}/{parts}, " if parts > 1 else ""
         status = getattr(report, "deliveryStatus", None)
         finalized = getattr(report, "timeFinalized", None)
         delay = ""
@@ -1331,7 +1356,7 @@ class Modem(threading.Thread):
             except Exception:
                 delay = ""
         self.l.info(
-            f"[{sms_id}] Delivery report for SMS to {recipient} (reference {report.reference}): "
+            f"[{sms_id}] Delivery report for SMS to {recipient} ({part_info}reference {report.reference}): "
             f"{delivery_status_text(status)} at {finalized}{delay} (SMSC received {getattr(report, 'timeSent', None)})."
         )
 
