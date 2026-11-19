@@ -230,6 +230,49 @@ if hasattr(GsmModem, '_GsmModem__threadedHandleModemNotification'):
 
 _original_gsm_modem_write = GsmModem.write
 
+# Network registration lines: unsolicited when the modem pushes them, but the answer when we asked for them
+REGISTRATION_PREFIXES = ('+CREG:', '+CGREG:', '+CEREG:')
+UNSOLICITED_PREFIXES = ('+CMTI', '+CDSI', '+DTMF', '+Z', '^', '+WIND', '+STIN', '+CRING') + REGISTRATION_PREFIXES
+
+
+def split_unsolicited(response_lines, command=None, response_term=None, call_status_updates=()):
+    """
+    Split the response of a command into its own lines and unsolicited notifications that arrived in between.
+    The answer to a registration query (AT+CREG? / AT+CGREG? / AT+CEREG?) is kept — before, it was filtered as
+    unsolicited, so the library never saw it and disabled the registration check ("+CREG check disabled").
+    @return: (own lines, unsolicited lines)
+    """
+    asked = ''
+    if isinstance(command, str):
+        cmd = command.strip().upper()
+        for prefix in REGISTRATION_PREFIXES:
+            if cmd.startswith('AT' + prefix[:-1]):  # e.g. AT+CREG? -> keep +CREG:
+                asked = prefix
+    own, unsolicited = [], []
+    next_line_is_pdu = False
+    for line in response_lines:
+        is_unsolicited = False
+        if response_term is not None and response_term.match(line):
+            pass
+        elif next_line_is_pdu:
+            is_unsolicited = True
+            next_line_is_pdu = False
+        elif asked and line.startswith(asked):
+            pass
+        elif line.startswith(UNSOLICITED_PREFIXES) or 'RING' in line:
+            is_unsolicited = True
+        elif line.startswith('+CDS') or line.startswith('+CMT'):
+            is_unsolicited = True
+            next_line_is_pdu = True
+        else:
+            for updateRegex, _ in call_status_updates:
+                if updateRegex.match(line):
+                    is_unsolicited = True
+                    break
+        (unsolicited if is_unsolicited else own).append(line)
+    return own, unsolicited
+
+
 @locked_method
 def _patched_gsm_modem_write(self, *args, **kwargs):
     waitForResponse = True
@@ -237,39 +280,16 @@ def _patched_gsm_modem_write(self, *args, **kwargs):
         waitForResponse = args[1]
     elif 'waitForResponse' in kwargs:
         waitForResponse = kwargs['waitForResponse']
+    command = args[0] if args else kwargs.get('data')
 
     responseLines = _original_gsm_modem_write(self, *args, **kwargs)
     if waitForResponse and responseLines:
-        filteredResponseLines = []
-        unsolicitedLines = []
-        next_line_is_pdu = False
-        for line in responseLines:
-            is_unsolicited = False
-            if self.RESPONSE_TERM.match(line):
-                pass
-            elif next_line_is_pdu:
-                unsolicitedLines.append(line)
-                next_line_is_pdu = False
-                is_unsolicited = True
-            elif line.startswith(('+CMTI', '+CDSI', '+DTMF', '+Z', '^', '+WIND', '+STIN', '+CRING', '+CREG:', '+CGREG:', '+CEREG:')) or 'RING' in line:
-                unsolicitedLines.append(line)
-                is_unsolicited = True
-            elif line.startswith('+CDS') or line.startswith('+CMT'):
-                unsolicitedLines.append(line)
-                is_unsolicited = True
-                next_line_is_pdu = True
-            else:
-                for updateRegex, _ in getattr(self, '_callStatusUpdates', []):
-                    if updateRegex.match(line):
-                        unsolicitedLines.append(line)
-                        is_unsolicited = True
-                        break
-            if not is_unsolicited:
-                filteredResponseLines.append(line)
+        responseLines, unsolicitedLines = split_unsolicited(
+            responseLines, command, self.RESPONSE_TERM, getattr(self, '_callStatusUpdates', [])
+        )
         if unsolicitedLines:
             self.log.debug('Filtered unsolicited lines from command response: %s', unsolicitedLines)
             self._handleModemNotification(unsolicitedLines)
-        responseLines = filteredResponseLines
     return responseLines
 
 GsmModem.write = _patched_gsm_modem_write
@@ -1094,17 +1114,16 @@ class Modem(threading.Thread):
 
         self.l.debug(f"Checking for network coverage...")
 
-        max_try = 10
-        for i in range(0,max_try):
-            self.status = f"Waiting for network ({i}/{max_try})."
-            try:
-                self.modem.waitForNetworkCoverage(120)
-                self.status = "Network found."
-            except TimeoutException:
-                self.l.error(f"Error: Failed to connect to network. Bad signal?")
-                self.status = "Error: Failed to connect to network."
-                self.modem.close()
-                return False
+        # one check is enough (before: ten checks in a row, ~10 s extra per start and re-initialisation)
+        self.status = "Waiting for network."
+        try:
+            self.modem.waitForNetworkCoverage(120)
+            self.status = "Network found."
+        except TimeoutException:
+            self.l.error(f"Error: Failed to connect to network. Bad signal?")
+            self.status = "Error: Failed to connect to network."
+            self.modem.close()
+            return False
 
         self._delete_sms(all=True)
 
