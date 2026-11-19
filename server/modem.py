@@ -60,7 +60,7 @@ from gsmmodem.exceptions import (
     CmsError,
     CommandError,
 )
-from gsmmodem.modem import GsmModem, SerialComms, SentSms, ReceivedSms
+from gsmmodem.modem import GsmModem, SerialComms, SentSms, ReceivedSms, Sms
 from gsmmodem.pdu import decodeSmsPdu, Concatenation
 import gsmmodem.pdu
 
@@ -317,6 +317,44 @@ RETRY_DELAY_MAX = 60
 # repeated at most this often — before, it ran in every loop of the sending thread.
 UNHEALTHY_RECHECK_SECONDS = 300
 
+# A concatenated SMS still missing parts after this time goes on with the parts received and a note for each
+# missing part (before: discarded after an hour, only when the next concatenated SMS arrived — nothing reached aidlink)
+CONCAT_INCOMPLETE_SECONDS = 1800
+
+# The same received SMS (or part) seen again within this time is ignored: the stored-message sweep may read an SMS
+# whose notification is handled at the same moment
+RECEIVED_DEDUP_SECONDS = 3600
+
+# Notifications of a new stored SMS or status report; the library only handles the first one of a block
+SMS_INDICATION_PREFIXES = ('+CMTI', '+CDSI')
+
+
+def concat_text(parts: dict, total_parts: int) -> str:
+    """
+    Text of a concatenated SMS from its parts; a missing part becomes a note in its place.
+    @param parts: part number -> sms.SMS
+    @param total_parts: number of parts announced by the sender
+    """
+    texts = []
+    for idx in range(1, total_parts + 1):
+        part = parts.get(idx)
+        texts.append(part.get_text() if part else f" [Teil {idx} von {total_parts} fehlt] ")
+    return "".join(texts).strip()
+
+
+def split_sms_indications(lines: List[str]) -> List[List[str]]:
+    """
+    Split a notification block so that every new-SMS / status-report indication is handled on its own. The library
+    handles the first +CMTI of a block and returns — two SMS (or both parts of a long SMS) notified together lost the
+    second one.
+    @return: blocks to hand to the library one after the other
+    """
+    indications = [line for line in lines if line.startswith(SMS_INDICATION_PREFIXES)]
+    if len(indications) <= 1:
+        return [lines]
+    rest = [line for line in lines if not line.startswith(SMS_INDICATION_PREFIXES)]
+    return [[line] for line in indications] + ([rest] if rest else [])
+
 # How long an SMS reference is kept to match the delivery report (status report) of the network.
 DELIVERY_REPORT_KEEP_SECONDS = 3 * 24 * 3600
 
@@ -389,6 +427,8 @@ class Modem(threading.Thread):
         self.zustellung = {}
         self.received_concat_buffer = {}  # key: (sender, concat_ref) -> dict of {num: SMS_object}
         self.processed_cmt_signatures = {}  # dict of (sender, text) -> timestamp for recently received CMT messages
+        self.recent_received = {}  # signature of a received SMS or part -> when seen (RECEIVED_DEDUP_SECONDS)
+        self._receive_lock = threading.RLock()  # concat buffer and recent_received (notification threads, sweep)
 
         self.last_health_check = None
         self.health_state = "OK"
@@ -651,54 +691,70 @@ class Modem(threading.Thread):
     def _handle_incoming_sms(self, _sms: sms.SMS) -> None:
         """
         Handle incoming SMS.
-        The _sms parameter is a sms.SMS object.
+        The _sms parameter is a sms.SMS object. Parts of a concatenated SMS are buffered until all parts are there
+        (or CONCAT_INCOMPLETE_SECONDS passed, see deliver_overdue_concat_sms).
+        """
+        if self._seen_before(_sms):
+            self.l.info(f"Ignoring SMS from {_sms.get_sender()} handled before (duplicate notification or stored-message sweep).")
+            return
+
+        if _sms.is_concatenated():
+            _sms = self._add_concat_part(_sms)
+            if _sms is None:
+                return  # Do not deliver the partial segment yet
+
+        self._deliver_received_sms(_sms)
+
+    def _seen_before(self, _sms: sms.SMS) -> bool:
+        """
+        Remember a received SMS (or part) and tell whether it was seen within RECEIVED_DEDUP_SECONDS.
         """
         now = helper.ensure_aware(datetime.datetime.now())
+        ts = _sms.get_timestamp()
+        signature = (
+            _sms.get_sender(),
+            _sms.get_concat_ref(),
+            _sms.get_concat_num(),
+            _sms.get_text(),
+            ts.isoformat() if ts else None,
+        )
+        with self._receive_lock:
+            self.recent_received = {
+                k: seen for k, seen in self.recent_received.items()
+                if (now - seen).total_seconds() < RECEIVED_DEDUP_SECONDS
+            }
+            if signature in self.recent_received:
+                return True
+            self.recent_received[signature] = now
+            return False
 
-        # If this is a concatenated SMS, we buffer and track its parts
-        if _sms.is_concatenated():
-            sender = _sms.get_sender() or "unknown"
-            ref = _sms.get_concat_ref()
-            num = _sms.get_concat_num()
-            total_parts = _sms.get_concat_parts()
+    def _add_concat_part(self, _sms: sms.SMS) -> Optional[sms.SMS]:
+        """
+        Buffer one part of a concatenated SMS.
+        @return: The reassembled SMS once all parts are there, otherwise None.
+        """
+        now = helper.ensure_aware(datetime.datetime.now())
+        sender = _sms.get_sender() or "unknown"
+        ref = _sms.get_concat_ref()
+        num = _sms.get_concat_num()
+        total_parts = _sms.get_concat_parts()
 
-            self.l.info(f"Received concatenated SMS part {num}/{total_parts} with ref {ref} from {sender}")
+        self.l.info(f"Received concatenated SMS part {num}/{total_parts} with ref {ref} from {sender}")
+        key = (sender, ref)
 
-            # Key for the reassembly buffer
-            key = (sender, ref)
+        with self._receive_lock:
+            entry = self.received_concat_buffer.get(key)
+            if entry is not None:
+                age = (now - helper.ensure_aware(entry['first_seen'])).total_seconds()
+                other_text = num in entry['parts'] and entry['parts'][num].get_text() != _sms.get_text()
+                if age > CONCAT_INCOMPLETE_SECONDS or other_text:
+                    # the reference is reused by a new message: the old one goes on as far as it came
+                    self.l.warning(f"New message with ref {ref} from {sender} while an older one is incomplete — delivering the older one as received.")
+                    self._deliver_incomplete_concat(key)
+                    entry = None
 
-            # Clean up ancient incomplete sessions (older than 1 hour)
-            for k in list(self.received_concat_buffer.keys()):
-                entry = self.received_concat_buffer[k]
-                first_seen = helper.ensure_aware(entry['first_seen'])
-                if (now - first_seen).total_seconds() > 3600:
-                    self.l.warning(f"Discarding incomplete concatenated SMS with ref {k[1]} from {k[0]}")
-                    if self.sms_disk_queue:
-                        for part_sms in entry['parts'].values():
-                            self.sms_disk_queue.delete_buffered_part(part_sms.get_id())
-                    del self.received_concat_buffer[k]
-
-            # Active collision / staleness check for this key
-            if key in self.received_concat_buffer:
-                entry = self.received_concat_buffer[key]
-                first_seen = helper.ensure_aware(entry['first_seen'])
-                # If existing session is older than 120s, assume it's stale or a collision
-                if (now - first_seen).total_seconds() > 600:
-                    self.l.warning(f"Stale session or collision detected for ref {ref} from {sender} (age > 600s). Discarding old incomplete session.")
-                    if self.sms_disk_queue:
-                        for part_sms in entry['parts'].values():
-                            self.sms_disk_queue.delete_buffered_part(part_sms.get_id())
-                    del self.received_concat_buffer[key]
-                # If part number already exists but content is different, it's a new message collision
-                elif num in entry['parts'] and entry['parts'][num].get_text() != _sms.get_text():
-                    self.l.warning(f"Collision detected for ref {ref} from {sender} (part {num} received with different content). Discarding old incomplete session.")
-                    if self.sms_disk_queue:
-                        for part_sms in entry['parts'].values():
-                            self.sms_disk_queue.delete_buffered_part(part_sms.get_id())
-                    del self.received_concat_buffer[key]
-
-            if key not in self.received_concat_buffer:
-                self.received_concat_buffer[key] = {
+            if entry is None:
+                entry = self.received_concat_buffer[key] = {
                     'parts': {},
                     'total_parts': total_parts,
                     'first_seen': now,
@@ -708,50 +764,94 @@ class Modem(threading.Thread):
                     'timestamp': _sms.get_timestamp(),
                 }
 
-            entry = self.received_concat_buffer[key]
-
             # Store/overwrite the part (handles duplicate delivery gracefully)
             entry['parts'][num] = _sms
             if self.sms_disk_queue:
                 self.sms_disk_queue.save_buffered_part(_sms)
 
-            # Check if all parts have been received
-            if len(entry['parts']) == entry['total_parts']:
-                self.l.info(f"All {entry['total_parts']} parts of concatenated SMS with ref {ref} from {sender} received. Reassembling...")
-
-                # Reassemble the full message text
-                assembled_parts = []
-                for idx in range(1, entry['total_parts'] + 1):
-                    part_sms = entry['parts'].get(idx)
-                    if part_sms:
-                        assembled_parts.append(part_sms.get_text())
-                    else:
-                        self.l.error(f"Missing part {idx} during reassembly of ref {ref} from {sender}.")
-                        assembled_parts.append("") # Fallback
-
-                assembled_text = "".join(assembled_parts)
-
-                # Create a new reassembled SMS object
-                _sms = sms.SMS(
-                    sms_id=None,
-                    recipient=entry['recipient'],
-                    text=assembled_text,
-                    timestamp=entry['timestamp'],
-                    sender=sender,
-                    receiving_modem=entry['receiving_modem'],
-                    flash=entry['flash']
-                )
-
-                if self.sms_disk_queue:
-                    for part_sms in entry['parts'].values():
-                        self.sms_disk_queue.delete_buffered_part(part_sms.get_id())
-
-                # Remove from buffer
-                del self.received_concat_buffer[key]
-            else:
+            if len(entry['parts']) < entry['total_parts']:
                 self.l.info(f"Buffered part {num}/{total_parts} of ref {ref} from {sender}. Currently have {len(entry['parts'])}/{entry['total_parts']} parts.")
-                return # Do not deliver the partial segment yet
+                return None
 
+            self.l.info(f"All {entry['total_parts']} parts of concatenated SMS with ref {ref} from {sender} received. Reassembling...")
+            return self._take_concat(key)
+
+    def _take_concat(self, key) -> sms.SMS:
+        """
+        Remove a concatenated SMS from the buffer (memory and disk) and build one SMS of its parts.
+        """
+        entry = self.received_concat_buffer.pop(key)
+        if self.sms_disk_queue:
+            for part_sms in entry['parts'].values():
+                self.sms_disk_queue.delete_buffered_part(part_sms.get_id())
+        return sms.SMS(
+            sms_id=None,
+            recipient=entry['recipient'],
+            text=concat_text(entry['parts'], entry['total_parts']),
+            timestamp=entry['timestamp'],
+            sender=key[0],
+            receiving_modem=entry['receiving_modem'],
+            flash=entry['flash']
+        )
+
+    def _deliver_incomplete_concat(self, key) -> None:
+        """
+        Deliver a concatenated SMS with the parts received; missing parts are marked in the text.
+        """
+        entry = self.received_concat_buffer[key]
+        missing = [i for i in range(1, entry['total_parts'] + 1) if i not in entry['parts']]
+        self.l.warning(f"Concatenated SMS with ref {key[1]} from {key[0]} incomplete (missing part(s) {missing} of {entry['total_parts']}) — delivering the parts received.")
+        self._deliver_received_sms(self._take_concat(key))
+
+    def deliver_overdue_concat_sms(self) -> int:
+        """
+        Deliver concatenated SMS still missing parts after CONCAT_INCOMPLETE_SECONDS (called by the health check).
+        @return: Number of SMS delivered incomplete.
+        """
+        now = helper.ensure_aware(datetime.datetime.now())
+        delivered = 0
+        with self._receive_lock:
+            for key, entry in list(self.received_concat_buffer.items()):
+                if (now - helper.ensure_aware(entry['first_seen'])).total_seconds() >= CONCAT_INCOMPLETE_SECONDS:
+                    self._deliver_incomplete_concat(key)
+                    delivered += 1
+        return delivered
+
+    def process_stored_sms(self) -> int:
+        """
+        Handle SMS left in the modem memory — received while smsgate was not running, or whose notification got lost —
+        and delete them. Called at start (before: all stored SMS were deleted unread) and by every health check.
+        @return: Number of SMS found.
+        """
+        if self.modem is None:
+            return 0
+        # the same lock as all modem commands (locked_method): no notification is handled in between
+        lock = getattr(self.modem, '_command_lock', None)
+        if lock is None:
+            lock = self.modem._command_lock = threading.RLock()
+        with lock:
+            try:
+                stored = self.modem.listStoredSms(status=Sms.STATUS_ALL)
+            except (CmsError, CommandError, TimeoutException) as e:
+                self.l.warning(f"Could not read SMS stored in the modem: {e}")
+                return 0
+            received = [m for m in stored if isinstance(m, ReceivedSms)]
+            if received:
+                self.l.warning(f"{len(received)} SMS found in the modem memory that were not handled on arrival — handling them now.")
+            for m in received:
+                self._handle_incoming_gsmmodem_sms(m)
+            if stored:
+                # listing marked them read; new SMS arriving meanwhile stay unread and are kept
+                try:
+                    self.modem.deleteMultipleStoredSms(1)
+                except CmsError:
+                    self.l.warning("Exception: Failed to delete read SMS.")
+        return len(received)
+
+    def _deliver_received_sms(self, _sms: sms.SMS) -> None:
+        """
+        Hand a received (complete) SMS on to the router.
+        """
         self.l.info("== SMS message received ==")
 
         self.last_received = datetime.datetime.now(tz=None)
@@ -1129,7 +1229,8 @@ class Modem(threading.Thread):
             self.modem.close()
             return False
 
-        self._delete_sms(all=True)
+        # SMS stored while smsgate was not running are handed on, not deleted unread
+        self.process_stored_sms()
 
         # We do not check the balance immediately, but wait a bit.
         # self.check_balance()
@@ -1477,6 +1578,13 @@ class Modem(threading.Thread):
         if not self.modem.smsc:
             return "CRITICAL", f"{self.identifier} No SMSC set."
 
+        # SMS whose notification got lost, and long SMS still missing parts, go on now
+        try:
+            self.process_stored_sms()
+            self.deliver_overdue_concat_sms()
+        except Exception as e:
+            self.l.error(f"Error handling stored or incomplete SMS: {e}", exc_info=True)
+
         s = self.modem.signalStrength
         if s == -1:
             return "WARNING", f"{self.identifier} Unknown signal strength."
@@ -1648,13 +1756,20 @@ class MyGsmModem(GsmModem):
 
     def _handleModemNotification(self, lines):
 
+        # SMS notifications are logged (without content) so that a lost SMS can be traced
+        indications = [line for line in lines if line.startswith(SMS_INDICATION_PREFIXES + ('+CMT:', '+CDS:'))]
+        if indications:
+            self.gw_modem.l.info(f"Modem notification: {indications}")
+
         for i in range(0, len(lines)):
 
-            if lines[i].startswith('+CMT') and i + 1 < len(lines):
-                #m = re.search('^\+CMT: "([^\"]+)"', lines[i])
-                #if m:
-                #    self.l.debug(f"From: {m.group(1)}")
-                _sms = decodeSmsPdu(lines[i + 1])
+            # '+CMT:' with colon — '+CMT' alone also matched '+CMTI' and read the next line as message
+            if lines[i].startswith('+CMT:') and i + 1 < len(lines):
+                try:
+                    _sms = decodeSmsPdu(lines[i + 1])
+                except Exception as e:
+                    self.l.warning(f"Could not decode SMS after {lines[i]!r}: {e}")
+                    continue
 
                 # Extract UDH/concatenation info if present
                 udh = _sms.get('udh', [])
@@ -1688,4 +1803,5 @@ class MyGsmModem(GsmModem):
 
                 self.gw_modem._handle_incoming_sms(new_sms)
 
-        return super()._handleModemNotification(lines)
+        for block in split_sms_indications(lines):
+            super()._handleModemNotification(block)
