@@ -281,6 +281,53 @@ import sms
 import serialportmapper
 
 
+# Outgoing SMS older than this are given up instead of being retried forever: a login link that arrives hours
+# later is useless, and a never-ending retry delays every other SMS of the modem.
+MAX_SEND_AGE_SECONDS = 6 * 3600
+
+# CMS errors that retrying will not fix (unassigned number, invalid mandatory information, invalid PDU/text
+# parameters) — such an SMS is given up at once.
+PERMANENT_CMS_ERRORS = {1, 96, 304, 305}
+
+# First retry delay and upper bound (exponential backoff), in seconds.
+RETRY_DELAY_START = 5
+RETRY_DELAY_MAX = 60
+
+# While a modem is not OK, its full health check (incl. the USSD balance request, which can take ~30 s) is
+# repeated at most this often — before, it ran in every loop of the sending thread.
+UNHEALTHY_RECHECK_SECONDS = 300
+
+# How long an SMS reference is kept to match the delivery report (status report) of the network.
+DELIVERY_REPORT_KEEP_SECONDS = 3 * 24 * 3600
+
+# TP-Status of a status report (3GPP TS 23.040 9.2.3.15): 0-31 delivered, 32-63 temporary error (the SMSC keeps
+# trying), 64 and above permanent error.
+def delivery_status_text(status: Optional[int]) -> str:
+    if status is None:
+        return "unknown status"
+    if status <= 31:
+        return "delivered"
+    if status <= 63:
+        return f"not yet delivered, SMSC keeps trying (status {status})"
+    return f"delivery failed (status {status})"
+
+
+def retry_decision(age_seconds: float, error: Exception, last_delay: Optional[float]) -> Tuple[bool, float]:
+    """
+    Decide what happens with an SMS whose sending failed.
+    @param last_delay: delay before the previous attempt, None on the first failure.
+    @return: (give_up, delay) — give_up for permanent errors or SMS older than MAX_SEND_AGE_SECONDS, otherwise the
+        delay before the next attempt: RETRY_DELAY_START, then doubled up to RETRY_DELAY_MAX.
+    """
+    if isinstance(error, CmsError) and getattr(error, "code", None) in PERMANENT_CMS_ERRORS:
+        return True, 0
+    if age_seconds >= MAX_SEND_AGE_SECONDS:
+        return True, 0
+    if last_delay is None:
+        return False, RETRY_DELAY_START
+    return False, min(last_delay * 2, RETRY_DELAY_MAX)
+
+
 
 class Modem(threading.Thread):
     def __init__(self, identifier: str, modem_config: modemconfig.ModemConfig, serial_ports_hint_file: str, sms_disk_queue=None) -> None:
@@ -295,6 +342,11 @@ class Modem(threading.Thread):
         self.sms_receiver_queue = queue.Queue()
         self.sms_sender_queue = queue.Queue()
         self.sent_sms = {}  # a dict of sent SMS; value is an SMS object
+        # SMS waiting for their next attempt after a failure: list of (due timestamp, SMS) — the sending thread
+        # does not sleep for retries any more, other SMS keep going out
+        self.retry_sms = []
+        # network reference of an accepted SMS -> (sms_id, recipient, accepted at), to log delivery reports
+        self.sent_by_reference = {}
         self.received_concat_buffer = {}  # key: (sender, concat_ref) -> dict of {num: SMS_object}
         self.processed_cmt_signatures = {}  # dict of (sender, text) -> timestamp for recently received CMT messages
 
@@ -766,10 +818,13 @@ class Modem(threading.Thread):
 
     def get_health_state(self) -> Tuple[str, Optional[str]]:
         """
-        Get the health state.
+        Get the health state. A modem whose sending thread has stopped is CRITICAL, so the router uses
+        another modem instead of queueing SMS that are never sent.
         @return: Returns the modem's internal health state as tuple of State, Message. State is either "OK", "WARNING",
             or "CRITICAL". Message is a human-readable string giving details about the issue. Message may be a None.
         """
+        if self.ident is not None and not self.is_alive():
+            return "CRITICAL", f"{self.identifier} Sending thread is not running."
         return self.health_state, self.health_logs
 
     def _do_health_check(self, do_now: bool = False) -> None:
@@ -780,11 +835,11 @@ class Modem(threading.Thread):
         """
         now = helper.ensure_aware(datetime.datetime.now())
         last_hc = helper.ensure_aware(self.last_health_check) if self.last_health_check else None
+        since_last = (now - last_hc).total_seconds() if last_hc else None
         if ((last_hc is None)
             or do_now
-            or (self.health_state != "OK")
-            or ((now - last_hc).total_seconds()
-                    >= self.modem_config.health_check_interval)):
+            or (self.health_state != "OK" and since_last >= UNHEALTHY_RECHECK_SECONDS)
+            or (since_last >= self.modem_config.health_check_interval)):
             self.health_state, self.health_logs = self._really_do_health_check()
 
     def _repeat_initialization(self) -> None:
@@ -977,6 +1032,7 @@ class Modem(threading.Thread):
                 self.current_port,
                 self.modem_config.baud,
                 smsReceivedCallbackFunc=self._handle_incoming_gsmmodem_sms,
+                smsStatusReportCallback=self._handle_status_report,
                 exclusive=True,
             )  # was True
             self.modem.log = logging.getLogger(f"Modem [{self.identifier}]")
@@ -1186,31 +1242,98 @@ class Modem(threading.Thread):
         """
         Internal function to send SMS.
         @param _sms: An SMS object of type sms.SMS.
-        @return: Returns either True or False. True means the SMS was accepted for delivery. You may want to check the
-            delivery status explicitly.
+        @return: Returns either True or False. True means the SMS was accepted for delivery by the network.
+            On a modem/network error the SMS is scheduled for a later attempt (without blocking this thread)
+            or given up (permanent error, too old). Timeouts and lost modems propagate to run().
         """
+        started = time.time()
         try:
             # sendSms returns a SentSms object
             self.status = "Send SMS."
-            self.l.info(f"Sending SMS to {_sms.get_recipient()}.")
-            self.sent_sms[_sms.get_id()] = self.modem.sendSms(
+            self.l.info(f"[{_sms.get_id()}] Sending SMS to {_sms.get_recipient()}.")
+            sent = self.modem.sendSms(
                 _sms.get_recipient(), _sms.get_text(),
                 waitForDeliveryReport=False,
                 sendFlash=_sms.is_flash()
             )
+            self.sent_sms[_sms.get_id()] = sent
+            reference = getattr(sent, "reference", None)
+            self.l.info(
+                f"[{_sms.get_id()}] SMS to {_sms.get_recipient()} accepted by the network after "
+                f"{time.time() - started:.1f} s (reference {reference}, queued {_sms.get_age().total_seconds():.0f} s ago)."
+            )
+            if reference is not None:
+                self._remember_reference(reference, _sms)
             if self.sms_disk_queue:
                 self.sms_disk_queue.delete_outgoing_sms(_sms.get_id())
             return True
         except (CmsError, CmeError, CommandError) as e:
-            self.l.error(f"Error: Failed to send SMS due to modem/network error: {e}")
-            retry_delay = getattr(_sms, 'retry_delay', 5)
-            self.l.info(f"Retrying sending SMS to {_sms.get_recipient()} in {retry_delay} seconds (will retry forever).")
-            time.sleep(retry_delay)
-            # Exponential backoff up to 60 seconds
-            _sms.retry_delay = min(retry_delay * 2, 60)
-            self.sms_sender_queue.put(_sms)
+            age = _sms.get_age().total_seconds()
+            give_up, delay = retry_decision(age, e, getattr(_sms, "retry_delay", None))
+            self.l.error(
+                f"[{_sms.get_id()}] Failed to send SMS to {_sms.get_recipient()} after {time.time() - started:.1f} s "
+                f"due to modem/network error: {e}"
+            )
+            if give_up:
+                self.l.error(
+                    f"[{_sms.get_id()}] Giving up SMS to {_sms.get_recipient()} (age {age:.0f} s, error {e}). "
+                    "It will not be sent."
+                )
+                if self.sms_disk_queue:
+                    self.sms_disk_queue.delete_outgoing_sms(_sms.get_id())
+            else:
+                _sms.retry_delay = delay
+                self._schedule_retry(_sms, delay)
 
         return False
+
+    def _schedule_retry(self, _sms: sms.SMS, delay: float) -> None:
+        """Schedule another attempt for an SMS after `delay` seconds without blocking the sending thread."""
+        self.l.info(f"[{_sms.get_id()}] Retrying SMS to {_sms.get_recipient()} in {delay:.0f} seconds.")
+        self.retry_sms.append((time.time() + delay, _sms))
+
+    def _requeue_due_retries(self) -> float:
+        """
+        Move retries that are due into the sending queue.
+        @return: Seconds until the next pending retry (at most 60), used as wait timeout of the sending loop.
+        """
+        now = time.time()
+        due = [entry for entry in self.retry_sms if entry[0] <= now]
+        self.retry_sms = [entry for entry in self.retry_sms if entry[0] > now]
+        for _, _sms in due:
+            self.sms_sender_queue.put(_sms)
+        if not self.retry_sms:
+            return 60
+        return max(0.5, min(60, min(entry[0] for entry in self.retry_sms) - now))
+
+    def _remember_reference(self, reference: int, _sms: sms.SMS) -> None:
+        """Keep the network reference of an accepted SMS to log its delivery report, drop old entries."""
+        now = time.time()
+        self.sent_by_reference = {
+            ref: entry for ref, entry in self.sent_by_reference.items()
+            if now - entry[2] < DELIVERY_REPORT_KEEP_SECONDS
+        }
+        self.sent_by_reference[reference] = (_sms.get_id(), _sms.get_recipient(), now)
+
+    def _handle_status_report(self, report) -> None:
+        """
+        Callback for delivery reports (status reports) of the network: logs when an SMS reached the phone or
+        why not. timeSent = SMSC received the SMS, timeFinalized = delivered / finally failed.
+        """
+        entry = self.sent_by_reference.get(report.reference)
+        sms_id, recipient, accepted = entry if entry else ("unknown", report.number, None)
+        status = getattr(report, "deliveryStatus", None)
+        finalized = getattr(report, "timeFinalized", None)
+        delay = ""
+        if accepted is not None and finalized is not None:
+            try:
+                delay = f", {finalized.timestamp() - accepted:.0f} s after acceptance"
+            except Exception:
+                delay = ""
+        self.l.info(
+            f"[{sms_id}] Delivery report for SMS to {recipient} (reference {report.reference}): "
+            f"{delivery_status_text(status)} at {finalized}{delay} (SMSC received {getattr(report, 'timeSent', None)})."
+        )
 
     def print_info(self) -> None:
         """
@@ -1302,7 +1425,7 @@ class Modem(threading.Thread):
                 day_matches = True
 
         elif self.modem_config.sms_self_test_interval == "weekly":
-            if now.weekday == 1:
+            if now.weekday() == 1:
                 day_matches = True
         else: # Third option is daily
             day_matches = True
@@ -1372,6 +1495,10 @@ class Modem(threading.Thread):
         seconds_between_calls = 1
 
         while True:
+            # the SMS currently being handled; None once it was sent, scheduled for retry or given up —
+            # only an SMS still in hand is put back after a timeout (before, a stale SMS was re-sent or the
+            # thread died with UnboundLocalError when no SMS had been handled yet)
+            _sms = None
 
             try:
                 # initialize modem if necessary
@@ -1380,9 +1507,10 @@ class Modem(threading.Thread):
                     self.print_info()
 
                 self.l.debug("Wake up.")
+                wait = self._requeue_due_retries()
                 try:
-                    # Wait for SMS or for a timeout
-                    _sms = self.sms_sender_queue.get(timeout=60)
+                    # Wait for SMS, a due retry or for a timeout
+                    _sms = self.sms_sender_queue.get(timeout=wait)
                     current_time = time.time()
                     elapsed_time = current_time - self.send_last_call_time
 
@@ -1390,7 +1518,9 @@ class Modem(threading.Thread):
                         time_to_wait = seconds_between_calls - elapsed_time
                         self.l.info(f"Throttled. Waiting for {time_to_wait:.2f} seconds.")
                         time.sleep(time_to_wait)
+                    self.send_last_call_time = time.time()
                     self._do_send_sms(_sms)
+                    _sms = None
                 except queue.Empty:
                     pass
 
@@ -1404,7 +1534,8 @@ class Modem(threading.Thread):
                 self.status = "Timeout."
                 self.close()
 
-                self.sms_sender_queue.put(_sms)
+                if _sms is not None:
+                    self.sms_sender_queue.put(_sms)
                 self._do_health_check(do_now=True)
 
             except Exception as e:
@@ -1415,7 +1546,8 @@ class Modem(threading.Thread):
                 self.status = "Error."
                 self.close()
 
-                self.sms_sender_queue.put(_sms)
+                if _sms is not None:
+                    self.sms_sender_queue.put(_sms)
                 self._do_health_check(do_now=True)
 
 

@@ -384,11 +384,11 @@ class SmsGate:
         while True:
 
             self.l.info("Waiting for next event ...")
-            if self.event_available.wait(
-                    timeout=self.config.getint(
-                        "modempool", "health_check_interval", fallback=600
-                    )
-            ):
+            # SMS waiting for a modem are routed again every minute, otherwise wait for the next event
+            wait_timeout = self.config.getint("modempool", "health_check_interval", fallback=600)
+            if self.pool.has_unroutable_sms():
+                wait_timeout = min(wait_timeout, 60)
+            if self.event_available.wait(timeout=wait_timeout):
 
                 # This code is executed either when an SMS was received
                 # or at a timeout.
@@ -420,6 +420,9 @@ class SmsGate:
                 # trigger health check
                 self.l.info("Check for health check ...")
                 self.pool.do_health_check()
+
+                if self.pool.has_unroutable_sms():
+                    self.pool.process_outgoing_sms()
 
 
 def setup_seccomp(log_only: bool = False) -> None:

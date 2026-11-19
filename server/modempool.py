@@ -47,6 +47,7 @@ from typing import Optional, Union, List, Tuple, Dict
 from modem import Modem
 from sms import SMS
 from smsrouter import SmsRouter
+from modem import MAX_SEND_AGE_SECONDS
 
 
 class ModemPool:
@@ -73,6 +74,8 @@ class ModemPool:
         self.event_available = None  # used to signal events
 
         self.sms_queue_out = queue.Queue()
+        # SMS for which no modem was available: routed again on the next run instead of being dropped
+        self.sms_unroutable = []
         self.sent_sms = {}  # a dict of sent SMS, value is an identifier (UUID)
 
         self.buffered_sms = {}  # key is a modem identifier, value a list of SMS objects
@@ -223,6 +226,13 @@ class ModemPool:
         to the modem for delivery. Handing over the SMS does not take that much time, therefore, it seems not necessary
         to do this in an own thread.
         """
+        # SMS that found no modem last time get another chance (a modem may be OK again)
+        if self.sms_unroutable:
+            self.l.info(f"Retry routing {len(self.sms_unroutable)} SMS that found no modem before.")
+            for _sms in self.sms_unroutable:
+                self.sms_queue_out.put(_sms)
+            self.sms_unroutable = []
+
         while not self.sms_queue_out.empty():
 
             self.l.info(
@@ -263,12 +273,23 @@ class ModemPool:
                 # remember where the SMS was sent.
                 self.sent_sms[sms.get_id()] = identifier
 
+            elif sms.get_age().total_seconds() >= MAX_SEND_AGE_SECONDS:
+                self.l.error(f"Failed to find a way to deliver SMS {sms.get_id()} to {sms.get_recipient()} for "
+                             f"{sms.get_age().total_seconds():.0f} s. Giving up, the SMS will not be sent.")
+                if hasattr(self, 'disk_queue') and self.disk_queue:
+                    self.disk_queue.delete_outgoing_sms(sms.get_id())
             else:
-                self.l.error(f"Failed to find a way to deliver SMS {sms.get_id()}. The SMS is removed from the "
-                             "queue and won't be put back.")
+                # Before, the SMS was dropped here and only sent after the next service restart (disk queue)
+                self.l.warning(f"No modem available for SMS {sms.get_id()} to {sms.get_recipient()}. Keep it and "
+                               "retry routing on the next run.")
+                self.sms_unroutable.append(sms)
 
         # check if there are internal structures to clean up
         self._cleanup()
+
+    def has_unroutable_sms(self) -> bool:
+        """True while SMS wait for a modem — the main loop then runs more often."""
+        return len(self.sms_unroutable) > 0
 
     def get_delivery_status(self, sms_id: str) -> bool:
         """
