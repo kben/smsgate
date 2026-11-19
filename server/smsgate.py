@@ -342,6 +342,10 @@ class SmsGate:
 
         self.l.info("Initializing modem pool.")
 
+        validity_days = self.config.getfloat("modempool", "sms_validity_days", fallback=4)
+        modem.set_sms_validity(validity_days)
+        self.l.info(f"Validity period of sent SMS: {f'{validity_days:g} days' if validity_days > 0 else 'default of the SMS centre'}.")
+
         for identifier in sim_config.sections():
 
             # read config

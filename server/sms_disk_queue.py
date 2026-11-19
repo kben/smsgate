@@ -131,6 +131,32 @@ class SMSDiskQueue:
             except Exception as e:
                 self.l.error(f"Failed to delete queued SMS file {filepath}: {e}")
 
+    def save_delivery_state(self, identifier: str, state: dict) -> None:
+        """
+        Save which network reference belongs to which sent SMS (per modem), so that delivery reports arriving after a
+        restart still reach the right SMS. Written atomically (temp file + rename).
+        """
+        filepath = os.path.join(self.queue_dir, f"delivery_{identifier}.json")
+        try:
+            tmp = filepath + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False)
+            os.replace(tmp, filepath)
+        except Exception as e:
+            self.l.error(f"Failed to save delivery state of modem {identifier}: {e}")
+
+    def load_delivery_state(self, identifier: str) -> dict:
+        """Load the state saved by save_delivery_state; empty when there is none or it cannot be read."""
+        filepath = os.path.join(self.queue_dir, f"delivery_{identifier}.json")
+        if not os.path.exists(filepath):
+            return {}
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            self.l.error(f"Failed to load delivery state of modem {identifier}: {e}")
+            return {}
+
     def load_all_buffered_parts(self, modems_pool=None) -> list:
         """Load and return all buffered parts saved on disk."""
         parts = []

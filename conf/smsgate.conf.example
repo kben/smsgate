@@ -42,6 +42,11 @@ health_check_interval = 3600
 # Possible values are: monthly, weekly, daily
 sms_self_test_interval = monthly
 
+# How many days the network keeps trying to deliver an SMS to a phone that is
+# switched off or unreachable. Afterwards the SMS fails (status 70) and aidlink
+# shows it as not delivered. 0 = default of the SMS centre (often 2 days).
+sms_validity_days = 4
+
 # A file that stores previously found associations between serial ports
 # and IMEIs. These associations are used as hints on server (re)start to
 # speed-up the process. The file must be writable by the server user.

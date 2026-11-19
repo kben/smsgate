@@ -62,6 +62,7 @@ from gsmmodem.exceptions import (
 )
 from gsmmodem.modem import GsmModem, SerialComms, SentSms, ReceivedSms, Sms
 from gsmmodem.pdu import decodeSmsPdu, Concatenation
+import gsmmodem.modem
 import gsmmodem.pdu
 
 # Patch GsmModem class-level regexes to prevent AttributeError/NoneType match errors
@@ -358,6 +359,35 @@ def split_sms_indications(lines: List[str]) -> List[List[str]]:
 # How long an SMS reference is kept to match the delivery report (status report) of the network.
 DELIVERY_REPORT_KEEP_SECONDS = 3 * 24 * 3600
 
+# How long the network keeps trying to deliver an SMS to a phone that is off or unreachable (TP validity period).
+# None = default of the SMS centre (seen 19.11.2026: about two days, then status 70). Set from smsgate.conf
+# ([modempool] sms_validity_days, default 4) by set_sms_validity().
+SMS_VALIDITY: Optional[datetime.timedelta] = None
+
+
+def set_sms_validity(days: float) -> None:
+    """
+    Validity period of sent SMS in days; 0 or less = leave it to the SMS centre. Kept for the delivery reports:
+    DELIVERY_REPORT_KEEP_SECONDS must be longer, a failure is only reported when the period is over.
+    """
+    global SMS_VALIDITY, DELIVERY_REPORT_KEEP_SECONDS
+    SMS_VALIDITY = datetime.timedelta(days=days) if days > 0 else None
+    if SMS_VALIDITY is not None:
+        DELIVERY_REPORT_KEEP_SECONDS = max(3 * 24 * 3600, int(SMS_VALIDITY.total_seconds()) + 24 * 3600)
+
+
+_original_encode_submit = gsmmodem.modem.encodeSmsSubmitPdu
+
+
+def _encode_submit_with_validity(*args, **kwargs):
+    """The library's sendSms() sets no validity period — add ours (relative, e.g. 4 days)."""
+    if SMS_VALIDITY is not None and kwargs.get('validity') is None:
+        kwargs['validity'] = SMS_VALIDITY
+    return _original_encode_submit(*args, **kwargs)
+
+
+gsmmodem.modem.encodeSmsSubmitPdu = _encode_submit_with_validity
+
 # TP-Status of a status report (3GPP TS 23.040 9.2.3.15): 0-31 delivered, 32-63 temporary error (the SMSC keeps
 # trying), 64 and above permanent error.
 def delivery_status_text(status: Optional[int]) -> str:
@@ -452,6 +482,8 @@ class Modem(threading.Thread):
         self.send_last_call_time = 0
 
         self.l = logging.getLogger(f"Modem [{identifier}]")
+        # references and open deliveries survive a restart: reports arrive up to days later (validity period)
+        self._zustellstand_laden()
 
         threading.Thread.__init__(self)
         self.start()
@@ -1411,6 +1443,7 @@ class Modem(threading.Thread):
             if not self._ist_selbsttest(_sms):
                 self.zustellung[_sms.get_id()] = {"teile": parts, "zugestellt": set()}
                 self._melde_status(_sms.get_id(), "angenommen", teile=parts, teile_zugestellt=0)
+            self._zustellstand_speichern()
             if self.sms_disk_queue:
                 self.sms_disk_queue.delete_outgoing_sms(_sms.get_id())
             return True
@@ -1498,6 +1531,45 @@ class Modem(threading.Thread):
             del self.zustellung[sms_id]
             self._melde_status(sms_id, "fehlgeschlagen", am=finalized,
                                text=f"vom Netz nicht zugestellt (Status {status})")
+        self._zustellstand_speichern()
+
+    def _zustellstand_speichern(self) -> None:
+        """
+        Save references and open deliveries to disk (sms_disk_queue). Before, they only lived in memory: after a
+        restart a report said "[unknown]" and aidlink never learned that the SMS failed (Nico 19.11.: SMS of 17.11.
+        expired after two days, smsgate restarted in between).
+        """
+        if not getattr(self, "sms_disk_queue", None):
+            return
+        self.sms_disk_queue.save_delivery_state(self.identifier, {
+            "references": {str(ref): list(entry) for ref, entry in self.sent_by_reference.items()},
+            "zustellung": {
+                sms_id: {"teile": stand["teile"], "zugestellt": sorted(stand["zugestellt"])}
+                for sms_id, stand in self.zustellung.items()
+            },
+        })
+
+    def _zustellstand_laden(self) -> None:
+        """Load what _zustellstand_speichern saved; entries older than DELIVERY_REPORT_KEEP_SECONDS are dropped."""
+        if not getattr(self, "sms_disk_queue", None):
+            return
+        state = self.sms_disk_queue.load_delivery_state(self.identifier)
+        now = time.time()
+        try:
+            self.sent_by_reference = {
+                int(ref): tuple(entry) for ref, entry in state.get("references", {}).items()
+                if now - entry[2] < DELIVERY_REPORT_KEEP_SECONDS
+            }
+            lebend = {entry[0] for entry in self.sent_by_reference.values()}
+            self.zustellung = {
+                sms_id: {"teile": stand["teile"], "zugestellt": set(stand["zugestellt"])}
+                for sms_id, stand in state.get("zustellung", {}).items() if sms_id in lebend
+            }
+        except (TypeError, ValueError, KeyError, IndexError) as e:
+            self.l.error(f"Ignoring unreadable delivery state: {e}")
+            self.sent_by_reference, self.zustellung = {}, {}
+        if self.sent_by_reference:
+            self.l.info(f"Restored {len(self.sent_by_reference)} references of sent SMS for delivery reports.")
 
     def _handle_status_report(self, report) -> None:
         """

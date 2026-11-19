@@ -22,6 +22,9 @@ class FakeDiskQueue:
     def delete_outgoing_sms(self, sms_id):
         self.deleted.append(sms_id)
 
+    def save_delivery_state(self, identifier, state):
+        self.delivery_state = state
+
 
 class FakeSent:
     def __init__(self, reference):
