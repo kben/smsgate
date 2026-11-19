@@ -48,6 +48,7 @@ import threading
 import time
 import traceback
 import psycopg2
+import zustellstatus
 
 import helper
 import modem
@@ -322,6 +323,19 @@ class SmsGate:
         )
         self.pool = modempool.ModemPool(health_check_interval)
         self.pool.disk_queue = self.disk_queue
+
+        # delivery status of outgoing SMS for aidlink (same database as the incoming SMS)
+        if self.config.getboolean("dbstore", "enabled", fallback=False):
+            self.zustellstatus = zustellstatus.ZustellStatusSchreiber(
+                lambda: psycopg2.connect(
+                    database=self.config.get("dbstore", "dbname"),
+                    host=self.config.get("dbstore", "dbhost"),
+                    user=self.config.get("dbstore", "dbuser"),
+                    password=self.config.get("dbstore", "dbpass"),
+                    port=self.config.get("dbstore", "dbport")
+                )
+            )
+            self.pool.set_status_callback(self.zustellstatus.melde)
         self.pool.set_event_thread(self.event_available)
 
         sim_config = SmsGate.read_sim_config()

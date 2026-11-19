@@ -383,6 +383,10 @@ class Modem(threading.Thread):
         self.retry_sms = []
         # network reference of an accepted SMS -> (sms_id, recipient, accepted at), to log delivery reports
         self.sent_by_reference = {}
+        # delivery status for aidlink (zustellstatus.py): callback(sms_id, status, am, teile, teile_zugestellt, text)
+        self.status_callback = None
+        # sms_id -> {"teile": n, "zugestellt": set of delivered part numbers} until the SMS is delivered or failed
+        self.zustellung = {}
         self.received_concat_buffer = {}  # key: (sender, concat_ref) -> dict of {num: SMS_object}
         self.processed_cmt_signatures = {}  # dict of (sender, text) -> timestamp for recently received CMT messages
 
@@ -1303,6 +1307,9 @@ class Modem(threading.Thread):
             )
             if reference is not None:
                 self._remember_reference(reference, _sms, parts)
+            if not self._ist_selbsttest(_sms):
+                self.zustellung[_sms.get_id()] = {"teile": parts, "zugestellt": set()}
+                self._melde_status(_sms.get_id(), "angenommen", teile=parts, teile_zugestellt=0)
             if self.sms_disk_queue:
                 self.sms_disk_queue.delete_outgoing_sms(_sms.get_id())
             return True
@@ -1320,11 +1327,26 @@ class Modem(threading.Thread):
                 )
                 if self.sms_disk_queue:
                     self.sms_disk_queue.delete_outgoing_sms(_sms.get_id())
+                if not self._ist_selbsttest(_sms):
+                    self._melde_status(_sms.get_id(), "fehlgeschlagen", text=f"Gateway hat aufgegeben: {e}")
             else:
                 _sms.retry_delay = delay
                 self._schedule_retry(_sms, delay)
 
         return False
+
+    def _melde_status(self, sms_id: str, status: str, am=None, teile=None, teile_zugestellt=None, text=None) -> None:
+        """Report a delivery status to aidlink (never raises; the self-test SMS are not reported)."""
+        if not self.status_callback:
+            return
+        try:
+            self.status_callback(sms_id, status, am, teile, teile_zugestellt, text)
+        except Exception as e:
+            self.l.error(f"[{sms_id}] Zustellstatus nicht übergeben: {e}")
+
+    @staticmethod
+    def _ist_selbsttest(_sms: sms.SMS) -> bool:
+        return (_sms.get_text() or "").startswith("health-check-")
 
     def _schedule_retry(self, _sms: sms.SMS, delay: float) -> None:
         """Schedule another attempt for an SMS after `delay` seconds without blocking the sending thread."""
@@ -1355,8 +1377,26 @@ class Modem(threading.Thread):
             ref: entry for ref, entry in self.sent_by_reference.items()
             if now - entry[2] < DELIVERY_REPORT_KEEP_SECONDS
         }
+        lebend = {entry[0] for entry in self.sent_by_reference.values()}
+        self.zustellung = {k: v for k, v in self.zustellung.items() if k in lebend or k == _sms.get_id()}
         for nr, ref in enumerate(part_references(reference, parts), start=1):
             self.sent_by_reference[ref] = (_sms.get_id(), _sms.get_recipient(), now, nr, parts)
+
+    def _zustellung_auswerten(self, sms_id: str, nr: int, status, finalized) -> None:
+        """Delivered when all parts are delivered; failed on a permanent error (TP-Status >= 64)."""
+        stand = self.zustellung.get(sms_id)
+        if stand is None or status is None:
+            return
+        if status <= 31:
+            stand["zugestellt"].add(nr)
+            if len(stand["zugestellt"]) >= stand["teile"]:
+                del self.zustellung[sms_id]
+                self._melde_status(sms_id, "zugestellt", am=finalized, teile=stand["teile"],
+                                   teile_zugestellt=len(stand["zugestellt"]))
+        elif status >= 64:
+            del self.zustellung[sms_id]
+            self._melde_status(sms_id, "fehlgeschlagen", am=finalized,
+                               text=f"vom Netz nicht zugestellt (Status {status})")
 
     def _handle_status_report(self, report) -> None:
         """
@@ -1374,6 +1414,7 @@ class Modem(threading.Thread):
                 delay = f", {finalized.timestamp() - accepted:.0f} s after acceptance"
             except Exception:
                 delay = ""
+        self._zustellung_auswerten(sms_id, nr, status, finalized)
         self.l.info(
             f"[{sms_id}] Delivery report for SMS to {recipient} ({part_info}reference {report.reference}): "
             f"{delivery_status_text(status)} at {finalized}{delay} (SMSC received {getattr(report, 'timeSent', None)})."

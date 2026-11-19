@@ -76,6 +76,8 @@ class ModemPool:
         self.sms_queue_out = queue.Queue()
         # SMS for which no modem was available: routed again on the next run instead of being dropped
         self.sms_unroutable = []
+        # delivery status for aidlink (zustellstatus.py), passed on to every modem
+        self.status_callback = None
         self.sent_sms = {}  # a dict of sent SMS, value is an identifier (UUID)
 
         self.buffered_sms = {}  # key is a modem identifier, value a list of SMS objects
@@ -89,6 +91,8 @@ class ModemPool:
         """
         identifier = modem.get_identifier()
         self.modems[identifier] = modem
+        if modem and self.status_callback:
+            modem.status_callback = self.status_callback
 
         if modem:
             self.router.add(identifier, modem.get_prefixes(), modem.get_costs(), modem)
@@ -278,6 +282,9 @@ class ModemPool:
                              f"{sms.get_age().total_seconds():.0f} s. Giving up, the SMS will not be sent.")
                 if hasattr(self, 'disk_queue') and self.disk_queue:
                     self.disk_queue.delete_outgoing_sms(sms.get_id())
+                if self.status_callback:
+                    self.status_callback(sms.get_id(), "fehlgeschlagen", None, None, None,
+                                         "kein Modem verfügbar — Gateway hat aufgegeben")
             else:
                 # Before, the SMS was dropped here and only sent after the next service restart (disk queue)
                 self.l.warning(f"No modem available for SMS {sms.get_id()} to {sms.get_recipient()}. Keep it and "
@@ -286,6 +293,13 @@ class ModemPool:
 
         # check if there are internal structures to clean up
         self._cleanup()
+
+    def set_status_callback(self, callback) -> None:
+        """Delivery status for aidlink: callback(sms_id, status, am, teile, teile_zugestellt, text)."""
+        self.status_callback = callback
+        for modem in self.modems.values():
+            if modem:
+                modem.status_callback = callback
 
     def has_unroutable_sms(self) -> bool:
         """True while SMS wait for a modem — the main loop then runs more often."""
