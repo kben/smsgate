@@ -466,6 +466,9 @@ class Modem(threading.Thread):
         self.health_check_expected_token = None
 
         self.modem = None
+        # memory incoming SMS are stored in (ME/SM), chosen by the library at connect — reading a delivery report
+        # switches the library's read memory to "SR" and keeps it there (see process_stored_sms)
+        self.receive_memory = None
         self.current_port = None
         self.status = None
         self.init_counter = 0
@@ -863,7 +866,9 @@ class Modem(threading.Thread):
             lock = self.modem._command_lock = threading.RLock()
         with lock:
             try:
-                stored = self.modem.listStoredSms(status=Sms.STATUS_ALL)
+                # always the receive memory: after a delivery report the library's read memory is "SR", where
+                # listing fails (CMS 500) and received SMS would never be found
+                stored = self.modem.listStoredSms(status=Sms.STATUS_ALL, memory=self.receive_memory)
             except (CmsError, CommandError, TimeoutException) as e:
                 self.l.warning(f"Could not read SMS stored in the modem: {e}")
                 return 0
@@ -1260,6 +1265,9 @@ class Modem(threading.Thread):
             self.status = "Error: Failed to connect to network."
             self.modem.close()
             return False
+
+        # the library stores the memory quoted ('"ME"'); it compares and sets it unquoted later
+        self.receive_memory = (getattr(self.modem, '_smsMemReadDelete', None) or '').strip('"') or None
 
         # SMS stored while smsgate was not running are handed on, not deleted unread
         self.process_stored_sms()

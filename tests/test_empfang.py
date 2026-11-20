@@ -40,8 +40,10 @@ class FakeGsm:
     def __init__(self, stored=()):
         self.stored = list(stored)
         self.delete_flags = []
+        self.listed_memory = []
 
-    def listStoredSms(self, status):
+    def listStoredSms(self, status, memory=None):
+        self.listed_memory.append(memory)
         return list(self.stored)
 
     def deleteMultipleStoredSms(self, flag):
@@ -67,6 +69,7 @@ def receiving_modem(gsm=None):
     m.health_check_expected_token = None
     m.current_network = "Testnetz"
     m.modem = gsm
+    m.receive_memory = "ME"
     return m
 
 
@@ -151,6 +154,13 @@ class TestStoredSms(unittest.TestCase):
         gsm.stored = [stored]  # the sweep reads it before the notification thread deleted it
         m.process_stored_sms()
         self.assertEqual([s.get_text() for s in received(m)], ["Bin krank heute"])
+
+    def test_lists_the_receive_memory_not_the_status_report_memory(self):
+        # reading a delivery report left the library's read memory on "SR" (CMS 500 on listing, 19.11.2026)
+        gsm = FakeGsm()
+        m = receiving_modem(gsm)
+        m.process_stored_sms()
+        self.assertEqual(gsm.listed_memory, ["ME"])
 
     def test_nothing_stored_deletes_nothing(self):
         gsm = FakeGsm()
